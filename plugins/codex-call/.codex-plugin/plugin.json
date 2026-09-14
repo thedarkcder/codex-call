@@ -1,6 +1,6 @@
 {
   "name": "codex-call",
-  "version": "0.1.5+codex.20260914162514",
+  "version": "0.1.8+codex.20260914170029",
   "description": "Place and conduct phone calls through Codex realtime voice using virtual Core Audio routing.",
   "author": {
     "name": "Local developer"

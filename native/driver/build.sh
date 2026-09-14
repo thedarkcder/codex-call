@@ -79,11 +79,11 @@ build_variant() {
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.5</string>
+	<string>0.1.8</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>5</string>
+	<string>8</string>
 	<key>CFPlugInFactories</key>
 	<dict>
 		<key>e395c745-4eea-4d94-bb92-46224221047c</key>

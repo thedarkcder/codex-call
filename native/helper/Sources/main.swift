@@ -800,12 +800,15 @@ func callAppProcessObjects() -> [AudioObjectID] {
     }
     let processes = processObjectIDs()
     let direct = processes.filter { callUIBundleIDs.contains(processBundleID($0)) }
+    let services = processes.filter { callServiceBundleIDs.contains(processBundleID($0)) }
     let activeServices = processes.filter {
         callServiceBundleIDs.contains(processBundleID($0))
             && (processIsRunningInput($0) || processIsRunningOutput($0))
     }
-    if !direct.isEmpty { return direct + activeServices }
-    let services = processes.filter { callServiceBundleIDs.contains(processBundleID($0)) }
+    // The Phone UI appears before avconferenced starts its audio stream. Include
+    // every known telephony service as soon as the UI exists so the tap continues
+    // to capture when Core Audio hands the live stream to that service later.
+    if !direct.isEmpty { return direct + services }
     return activeServices.isEmpty ? services : activeServices
 }
 
@@ -866,13 +869,9 @@ func commandRun(argv: [String], json: Bool) {
         do {
             var links: [Router.Link] = []
             if mode == "call" {
-                // The tap child writes the muted remote caller into RX. Capture RX
-                // and TX here and mix both into ONE physical-output IOProc. Giving
-                // the child a second speaker IOProc made the two render paths race,
-                // while sharing one ring between RX and the speaker let either
-                // consumer starve the other.
-                links.append(Router.Link(source: rx, destination: physicalOutput))
-                links.append(Router.Link(source: tx, destination: physicalOutput))
+                // The tap child owns the complete call bridge. In particular, do
+                // not read TX here: Phone must be TX's only input consumer or Codex
+                // audio stalls until the call releases the device.
             } else {
                 links.append(Router.Link(source: input, destination: rx))
                 links.append(Router.Link(source: tx, destination: physicalOutput))
@@ -906,7 +905,13 @@ func commandRun(argv: [String], json: Bool) {
         let helper = CommandLine.arguments[0]
         let process = Process()
         process.executableURL = URL(fileURLWithPath: helper)
-        process.arguments = ["tap-call", "--to", virtualRXName, "--json"]
+        process.arguments = [
+            "tap-call",
+            "--remote-to", virtualRXName,
+            "--monitor", deviceName(physicalOutput),
+            "--codex-bundle", "com.openai.codex.helper",
+            "--json",
+        ]
         // Hidden aggregate/tap failures previously looked like connected calls with
         // silent audio, so keep child diagnostics in the app log.
         process.standardOutput = FileHandle.standardOutput
@@ -1044,7 +1049,7 @@ func commandRun(argv: [String], json: Bool) {
         if mode == "call" {
             if callTapReady(), !router.running {
                 rebuild()
-                print("call monitor ready: RX + TX -> \(deviceName(physicalOutput))")
+                print("call bridge ready: remote -> RX, Codex -> TX directly, both -> \(deviceName(physicalOutput))")
                 fflush(stdout)
             }
             if callUIAppRunning() {
@@ -1245,6 +1250,18 @@ final class LevelMeter {
         count += 1
         let magnitude = abs(value)
         if magnitude > peak { peak = magnitude }
+        lock.unlock()
+    }
+    func add(_ values: UnsafePointer<Float>, count sampleCount: Int) {
+        guard sampleCount > 0 else { return }
+        lock.lock()
+        for index in 0..<sampleCount {
+            let value = values[index]
+            sum += Double(value) * Double(value)
+            count += 1
+            let magnitude = abs(value)
+            if magnitude > peak { peak = magnitude }
+        }
         lock.unlock()
     }
     func snapshot() -> (rms: Double, peak: Float, count: Int) {
@@ -1612,76 +1629,174 @@ func commandTap(argv: [String], json: Bool) {
 
 
 func commandTapCall(argv: [String], json: Bool) {
-    let toName = option("--to", argv) ?? virtualRXName
-    guard let toDevice = findDevice(named: toName) else {
-        if json { print(jsonString(["ok": false, "error": "target device not found"])) }
-        else { print("tap-call: target device not found") }
+    let remoteToName = option("--remote-to", argv) ?? option("--to", argv) ?? virtualRXName
+    let monitorName = option("--monitor", argv) ?? ""
+    guard let remoteToDevice = findDevice(named: remoteToName),
+          let monitorDevice = findDevice(named: monitorName) else {
+        if json { print(jsonString(["ok": false, "error": "bridge output device not found"])) }
+        else { print("tap-call: bridge output device not found") }
         exit(2)
     }
-    let mute = !argv.contains("--unmuted")
 
-    var processes: [AudioObjectID] = []
+    var remoteProcesses: [AudioObjectID] = []
     // Background telephony services can exist with no live call. Wait for the
     // Phone/FaceTime process so the tap cannot bind to an idle service set.
     for _ in 0..<300 {
         if callUIAppRunning() {
-            processes = callAppProcessObjects()
-            if !processes.isEmpty { break }
+            remoteProcesses = callAppProcessObjects()
+            if !remoteProcesses.isEmpty { break }
         }
         Thread.sleep(forTimeInterval: 0.1)
     }
-    guard !processes.isEmpty else {
+    guard !remoteProcesses.isEmpty else {
         if json { print(jsonString(["ok": false, "error": "no active call app process"])) }
         else { print("tap-call: no active call app process") }
         exit(3)
     }
-    guard let tap = createProcessTap(processObjects: processes, mute: mute) else {
-        if json { print(jsonString(["ok": false, "error": "tap create failed"])) }
+
+    let codexBundle = option("--codex-bundle", argv) ?? "com.openai.codex.helper"
+    let codexProcesses = processObjectIDs().filter { processBundleID($0) == codexBundle }
+    guard !codexProcesses.isEmpty else {
+        if json { print(jsonString(["ok": false, "error": "Codex audio process not found"])) }
+        else { print("tap-call: Codex audio process not found") }
+        exit(3)
+    }
+
+    // Mute the call app so its remote audio can be copied to RX and the local
+    // monitor without feedback. Do not mute or reroute Codex: Codex already writes
+    // directly to TX, which must remain independent of the optional local monitor.
+    // Tap every matching Codex process because Chromium creates separate audio and
+    // video service processes with the same bundle identifier.
+    guard let remoteTap = createProcessTap(processObjects: remoteProcesses, mute: true) else {
+        if json { print(jsonString(["ok": false, "error": "process tap creation failed"])) }
         else { print("tap-call: process tap creation failed") }
         exit(3)
     }
+    guard let codexTap = createProcessTap(processObjects: codexProcesses, mute: false) else {
+        AudioHardwareDestroyProcessTap(remoteTap)
+        if json { print(jsonString(["ok": false, "error": "Codex tap creation failed"])) }
+        else { print("tap-call: Codex tap creation failed") }
+        exit(3)
+    }
     let clockUID = clockDeviceUID(fallback: deviceUID(defaultOutput()))
-    let uid = tapUID(tap)
-    guard !uid.isEmpty,
-          let aggregate = createTapAggregate(tapUIDString: uid, clockDeviceUID: clockUID) else {
-        AudioHardwareDestroyProcessTap(tap)
-        if json { print(jsonString(["ok": false, "error": "aggregate failed"])) }
-        else { print("tap-call: aggregate device creation failed") }
+    let remoteUID = tapUID(remoteTap)
+    let codexUID = tapUID(codexTap)
+    guard !remoteUID.isEmpty, !codexUID.isEmpty,
+          let remoteAggregate = createTapAggregate(
+              tapUIDString: remoteUID, clockDeviceUID: clockUID
+          ) else {
+        AudioHardwareDestroyProcessTap(codexTap)
+        AudioHardwareDestroyProcessTap(remoteTap)
+        if json { print(jsonString(["ok": false, "error": "bridge aggregate creation failed"])) }
+        else { print("tap-call: bridge aggregate creation failed") }
+        exit(3)
+    }
+    guard let codexAggregate = createTapAggregate(
+        tapUIDString: codexUID, clockDeviceUID: clockUID
+    ) else {
+        AudioHardwareDestroyAggregateDevice(remoteAggregate)
+        AudioHardwareDestroyProcessTap(codexTap)
+        AudioHardwareDestroyProcessTap(remoteTap)
+        if json { print(jsonString(["ok": false, "error": "Codex aggregate creation failed"])) }
+        else { print("tap-call: Codex aggregate creation failed") }
         exit(3)
     }
 
-    let ring = RingBuffer(channels: 8, capacityFrames: 96_000)
-    let captureScratch = Scratch()
-    let renderScratch = Scratch()
+    let remoteRXRing = RingBuffer(channels: 8, capacityFrames: 96_000)
+    let remoteMonitorRing = RingBuffer(channels: 8, capacityFrames: 96_000)
+    let codexMonitorRing = RingBuffer(channels: 8, capacityFrames: 96_000)
+    let remoteCaptureScratch = Scratch()
+    let codexCaptureScratch = Scratch()
+    let remoteRenderScratch = Scratch()
+    let monitorScratch = MixerScratch()
+    let codexMeter = LevelMeter()
 
-    var captureProc: AudioDeviceIOProcID?
-    let captureStatus = AudioDeviceCreateIOProcIDWithBlock(&captureProc, aggregate, nil) {
+    var remoteCaptureProc: AudioDeviceIOProcID?
+    var codexCaptureProc: AudioDeviceIOProcID?
+    var remoteRenderProc: AudioDeviceIOProcID?
+    var monitorRenderProc: AudioDeviceIOProcID?
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: callTapReadyURL)
+        if let proc = monitorRenderProc {
+            AudioDeviceStop(monitorDevice, proc)
+            AudioDeviceDestroyIOProcID(monitorDevice, proc)
+        }
+        if let proc = remoteRenderProc {
+            AudioDeviceStop(remoteToDevice, proc)
+            AudioDeviceDestroyIOProcID(remoteToDevice, proc)
+        }
+        if let proc = codexCaptureProc {
+            AudioDeviceStop(codexAggregate, proc)
+            AudioDeviceDestroyIOProcID(codexAggregate, proc)
+        }
+        if let proc = remoteCaptureProc {
+            AudioDeviceStop(remoteAggregate, proc)
+            AudioDeviceDestroyIOProcID(remoteAggregate, proc)
+        }
+        AudioHardwareDestroyAggregateDevice(codexAggregate)
+        AudioHardwareDestroyAggregateDevice(remoteAggregate)
+        AudioHardwareDestroyProcessTap(codexTap)
+        AudioHardwareDestroyProcessTap(remoteTap)
+    }
+
+    let remoteCaptureStatus = AudioDeviceCreateIOProcIDWithBlock(
+        &remoteCaptureProc, remoteAggregate, nil
+    ) {
         _, inputData, _, _, _ in
-        inputToRing(inputData, ring: ring, scratch: captureScratch)
+        inputToRings(
+            inputData,
+            rings: [remoteRXRing, remoteMonitorRing],
+            scratch: remoteCaptureScratch
+        )
     }
-    var renderProc: AudioDeviceIOProcID?
-    let renderStatus = AudioDeviceCreateIOProcIDWithBlock(&renderProc, toDevice, nil) {
+    let codexCaptureStatus = AudioDeviceCreateIOProcIDWithBlock(
+        &codexCaptureProc, codexAggregate, nil
+    ) {
+        _, inputData, _, _, _ in
+        inputToRing(inputData, ring: codexMonitorRing, scratch: codexCaptureScratch)
+        let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+        for buffer in list {
+            let channels = Int(buffer.mNumberChannels)
+            guard let raw = buffer.mData, channels > 0 else { continue }
+            let source = raw.assumingMemoryBound(to: Float.self)
+            let samples = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+            codexMeter.add(source, count: samples)
+        }
+    }
+    let remoteRenderStatus = AudioDeviceCreateIOProcIDWithBlock(
+        &remoteRenderProc, remoteToDevice, nil
+    ) {
         _, _, _, outputData, _ in
-        ringToOutput(outputData, ring: ring, scratch: renderScratch)
+        ringToOutput(outputData, ring: remoteRXRing, scratch: remoteRenderScratch)
     }
-    guard captureStatus == noErr, renderStatus == noErr, let cap = captureProc, let ren = renderProc else {
-        if let proc = captureProc { AudioDeviceDestroyIOProcID(aggregate, proc) }
-        if let proc = renderProc { AudioDeviceDestroyIOProcID(toDevice, proc) }
-        AudioHardwareDestroyAggregateDevice(aggregate)
-        AudioHardwareDestroyProcessTap(tap)
+    let monitorRenderStatus = AudioDeviceCreateIOProcIDWithBlock(
+        &monitorRenderProc, monitorDevice, nil
+    ) {
+        _, _, _, outputData, _ in
+        ringsToOutput(
+            outputData,
+            rings: [remoteMonitorRing, codexMonitorRing],
+            scratch: monitorScratch
+        )
+    }
+    guard remoteCaptureStatus == noErr, codexCaptureStatus == noErr,
+          remoteRenderStatus == noErr, monitorRenderStatus == noErr,
+          let remoteCapture = remoteCaptureProc, let codexCapture = codexCaptureProc,
+          let remoteRender = remoteRenderProc, let monitorRender = monitorRenderProc else {
+        cleanup()
         if json { print(jsonString(["ok": false, "error": "i/o setup failed"])) }
         else { print("tap-call: audio I/O setup failed") }
         exit(3)
     }
-    let renderStart = AudioDeviceStart(toDevice, ren)
-    let captureStart = AudioDeviceStart(aggregate, cap)
-    guard renderStart == noErr, captureStart == noErr else {
-        if captureStart == noErr { AudioDeviceStop(aggregate, cap) }
-        if renderStart == noErr { AudioDeviceStop(toDevice, ren) }
-        AudioDeviceDestroyIOProcID(toDevice, ren)
-        AudioDeviceDestroyIOProcID(aggregate, cap)
-        AudioHardwareDestroyAggregateDevice(aggregate)
-        AudioHardwareDestroyProcessTap(tap)
+    let starts = [
+        AudioDeviceStart(remoteToDevice, remoteRender),
+        AudioDeviceStart(monitorDevice, monitorRender),
+        AudioDeviceStart(remoteAggregate, remoteCapture),
+        AudioDeviceStart(codexAggregate, codexCapture),
+    ]
+    guard starts.allSatisfy({ $0 == noErr }) else {
+        cleanup()
         if json { print(jsonString(["ok": false, "error": "i/o start failed"])) }
         else { print("tap-call: audio I/O start failed") }
         exit(3)
@@ -1692,11 +1807,19 @@ func commandTapCall(argv: [String], json: Bool) {
     if json {
         print(jsonString([
             "ok": true,
-            "to": toName,
-            "processes": processes.map { processBundleID($0) },
+            "remoteTo": remoteToName,
+            "codexTo": "direct system output",
+            "monitor": monitorName,
+            "remoteProcesses": remoteProcesses.map { processBundleID($0) },
+            "codexProcesses": codexProcesses.map {
+                ["bundleID": processBundleID($0), "pid": Int(processPID($0))]
+            },
         ]))
     } else {
-        print("tap-call: routing remote audio to \(toName)")
+        print(
+            "tap-call: remote -> \(remoteToName), Codex -> TX directly, "
+                + "monitor -> \(monitorName)"
+        )
     }
     fflush(stdout)
 
@@ -1711,15 +1834,23 @@ func commandTapCall(argv: [String], json: Bool) {
         sources.append(source)
     }
     _ = sources
+    let meterQueue = DispatchQueue(label: "codexcall.tapcall.meter")
+    let meterTimer = DispatchSource.makeTimerSource(queue: meterQueue)
+    meterTimer.schedule(deadline: .now() + 3, repeating: 3)
+    meterTimer.setEventHandler {
+        let level = codexMeter.snapshot()
+        print(
+            "tap-call Codex meter: rms=\(String(format: "%.5f", level.rms)) "
+                + "peak=\(String(format: "%.5f", Double(level.peak))) "
+                + "samples=\(level.count)"
+        )
+        fflush(stdout)
+    }
+    meterTimer.resume()
     semaphore.wait()
+    meterTimer.cancel()
 
-    try? FileManager.default.removeItem(at: callTapReadyURL)
-    AudioDeviceStop(toDevice, ren)
-    AudioDeviceStop(aggregate, cap)
-    AudioDeviceDestroyIOProcID(toDevice, ren)
-    AudioDeviceDestroyIOProcID(aggregate, cap)
-    AudioHardwareDestroyAggregateDevice(aggregate)
-    AudioHardwareDestroyProcessTap(tap)
+    cleanup()
 }
 
 func commandRequestMic(json: Bool) {

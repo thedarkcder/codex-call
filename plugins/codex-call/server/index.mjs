@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import readline from "node:readline";
 
 const PROTOCOL_VERSION = "2024-11-05";
-const SERVER_INFO = { name: "codex-call", version: "0.1.5" };
+const SERVER_INFO = { name: "codex-call", version: "0.1.8" };
 const CONNECT_TIMEOUT_MS = positiveIntegerEnv("CODEX_CALL_CONNECT_TIMEOUT_MS", 75_000);
 const CONNECT_POLL_MS = positiveIntegerEnv("CODEX_CALL_CONNECT_POLL_MS", 250);
 

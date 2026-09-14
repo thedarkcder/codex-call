@@ -51,15 +51,17 @@ release and audio-device combination.
   line.
 - **Remote → Codex and local monitor** — the call app's audio is captured
   digitally into RX and mixed to the physical speakers.
-- **Codex → phone and local monitor** — TX is consumed by the call app as its
-  microphone and mixed to the physical speakers through one output callback.
+- **Codex → phone and local monitor** — Codex writes directly to TX for the call
+  app's microphone; an unmuted process tap independently mirrors Codex to the
+  physical speakers.
 - **Menu-bar + window app** that configures the user-level Codex plugin, owns
   the audio router, and provides a signed-package update check.
 
 ### Reliability fixes
 
-- The router fans one tapped source out to RX and the local monitor, and mixes
-  remote + Codex audio into a single physical-output IOProc.
+- The router fans remote audio out to RX and the local monitor, and mixes the
+  remote and unmuted Codex monitor taps into one physical-output IOProc. The
+  phone path stays direct, so a failed local monitor cannot silence the caller.
 - Core Audio IO is stopped before an aggregate device or process tap is
   destroyed; failed graph builds clean up all partially-started IOProcs.
 - A changed Phone/FaceTime audio-process set causes a complete tap + aggregate
@@ -154,7 +156,7 @@ prompt at launch and never performs an unattended privileged installation.
 
 ```bash
 installer/build-pkg.sh
-open dist/CodexCall-0.1.5.pkg
+open dist/CodexCall-0.1.8.pkg
 ```
 
 `scripts/install.sh` and `app/install-app.sh` are retained as developer
