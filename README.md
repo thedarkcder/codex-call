@@ -34,8 +34,9 @@ This is an **experimental prototype**. Use it at your own risk.
 
 ## Status
 
-This is a working prototype. Audio routing and call placement work; two things
-are still unreliable (see below).
+This is a working prototype. The routing and lifecycle reliability fixes below
+are implemented; a real-call soak test is still required on each supported macOS
+release and audio-device combination.
 
 ### Working
 
@@ -47,23 +48,37 @@ are still unreliable (see below).
 - **Normal voice** — physical mic → RX → Codex; Codex → TX → speakers.
 - **Call placement** — `start_phone_call` switches to call mode and opens the
   Phone/FaceTime dialer.
-- **Remote → Codex** — the call app's audio is captured digitally into RX and
-  Codex transcribes it.
-- **Menu-bar + window app** that installs the driver/helper/plugin and owns the
-  audio router (Start/Stop/Quit).
+- **Remote → Codex and local monitor** — the call app's audio is captured
+  digitally into RX and mixed to the physical speakers.
+- **Codex → phone and local monitor** — TX is consumed by the call app as its
+  microphone and mixed to the physical speakers through one output callback.
+- **Menu-bar + window app** that configures the user-level Codex plugin, owns
+  the audio router, and provides a signed-package update check.
 
-### Not working / unreliable
+### Reliability fixes
 
-- **Hearing Codex locally during a real call.** The process tap requires an
-  aggregate device, which conflicts with rendering Codex's voice to the
-  speakers. Reliable in the simulated test, flaky on real calls.
-- **Codex reliably replying on a real call.** It hears the line and sometimes
-  replies; the realtime session's turn-taking is not reliably triggered by phone
-  audio.
-- **Hang-up detection** has missed a hang-up (state can stay `IN_CALL`).
-- **Steering the live voice session.** The plugin cannot inject "you're on a
-  call, reply now" into Codex's realtime session: MCP tools can't reach it, and
-  the desktop app's app-server is stdio-private. This is the core limitation.
+- The router fans one tapped source out to RX and the local monitor, and mixes
+  remote + Codex audio into a single physical-output IOProc.
+- Core Audio IO is stopped before an aggregate device or process tap is
+  destroyed; failed graph builds clean up all partially-started IOProcs.
+- A changed Phone/FaceTime audio-process set causes a complete tap + aggregate
+  rebuild instead of leaving the router attached to a stale process object.
+- State remains `STARTING_CALL` until call audio actually becomes active.
+  Hang-up detection follows the call processes' active input/output audio and
+  returns to `NORMAL` after activity ends, even when the app stays open.
+- `end_phone_call` now terminates the active Phone/FaceTime app before restoring
+  routing, and reports when macOS does not confirm the hang-up.
+- The app compares helper contents rather than file size and safely restarts an
+  older running helper after an update.
+- Restore now resets the default system-output device as well as input/output.
+
+### Remaining platform limitation
+
+The plugin still cannot directly append instructions to, or force a turn in,
+the desktop app's already-running realtime session. MCP and the renderer-owned
+realtime transport are separate. The strengthened routing and audio-activity
+state remove several causes of apparent silence, but a true realtime-session
+steering API would require a Codex desktop integration point.
 
 ## Architecture
 
@@ -103,29 +118,52 @@ RX and TX are isolated, so Codex never hears itself.
 
 ### Download (easiest)
 
-1. Download **`CodexCall-macos.zip`** from the
+1. Download **`CodexCall-<version>.pkg`** from the
    [latest release](https://github.com/thedarkcder/codex-call/releases/latest).
-2. Unzip and move **Codex Call.app** to `/Applications`.
-3. Double-click it.
+2. Open the package and complete the standard macOS Installer flow.
+3. Installer opens **Codex Call** when installation completes. If no graphical
+   user is logged in, open it later from `/Applications`.
 
-The app installs the virtual audio driver (admin password required), the helper,
-and the Codex plugin, then starts the router. On first run macOS may ask for
-Microphone and Audio Recording permissions.
+The Developer ID-signed package installs the app, helper, and virtual audio
+drivers. Installer owns the one administrator-authorization step; Codex Call
+does not create temporary root scripts, invoke AppleScript authorization, or
+handle your password. On first launch the app installs the user-level Codex
+plugin and starts the router. macOS may then ask for Microphone and Audio
+Recording permissions.
 
-The app is signed with a Developer ID but not notarized, so Gatekeeper may warn;
-if so, right-click the app and choose **Open** once.
+Release packages are Developer ID signed, notarized, and stapled so Gatekeeper
+can verify the publisher and package integrity.
+
+### Updates
+
+Choose **Check for Updates…** from the app window or menu-bar menu. The app:
+
+1. reads the latest GitHub release,
+2. downloads its `.pkg` asset,
+3. verifies that it is signed by the expected Developer ID Installer team, and
+4. opens the standard macOS Installer.
+
+Update checks are user-initiated. The app never produces a surprise password
+prompt at launch and never performs an unattended privileged installation.
 
 ### Build from source
 
 ```bash
-scripts/install.sh
+installer/build-pkg.sh
+open dist/CodexCall-0.1.4.pkg
 ```
 
-or build and launch the app:
+`scripts/install.sh` and `app/install-app.sh` are retained as developer
+convenience wrappers; both build the same package and open it in Installer.
+They do not call `sudo` or create an ad-hoc privileged script.
+
+A distributable package requires both a **Developer ID Application** identity
+and a **Developer ID Installer** identity. Set `REQUIRE_SIGNING=1` to make a
+missing installer identity a build error. Set `NOTARY_PROFILE` to a keychain
+profile created for `notarytool` to notarize and staple the package:
 
 ```bash
-app/install-app.sh
-open "/Applications/Codex Call.app"
+REQUIRE_SIGNING=1 NOTARY_PROFILE=codex-call installer/build-pkg.sh
 ```
 
 ### One-time Codex setting
@@ -152,8 +190,9 @@ it calls `end_phone_call` and normal routing is restored.
 plugins/codex-call/     Codex plugin (manifest, MCP server, skills)
 native/driver/          Core Audio driver build/install (RX, TX, Clock)
 native/helper/          Swift routing helper + CLI
-app/                    Menu-bar + window app (installs everything)
-scripts/                install / uninstall
+app/                    Menu-bar + window app, router owner, and updater
+installer/              signed macOS package build and fixed package scripts
+scripts/                developer wrappers and manual uninstall
 ```
 
 ## Diagnostics

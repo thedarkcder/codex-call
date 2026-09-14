@@ -2,6 +2,8 @@ native/driver/.cache/
 native/driver/build/
 native/helper/build/
 app/build/
+installer/build/
+dist/
 native/**/DerivedData/
 *.o
 *.dSYM/

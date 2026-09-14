@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+# Stop only Codex Call's router before replacing its executable and audio drivers.
+if [ -x /usr/local/lib/codex-call/CodexCallHelper.app/Contents/MacOS/codex-call-helper ]; then
+  /usr/local/lib/codex-call/CodexCallHelper.app/Contents/MacOS/codex-call-helper restore >/dev/null 2>&1 || true
+elif [ -x /usr/local/bin/codex-call-helper ]; then
+  /usr/local/bin/codex-call-helper restore >/dev/null 2>&1 || true
+fi
+/usr/bin/pkill -x codex-call-helper >/dev/null 2>&1 || true
+/usr/bin/pkill -x CodexCall >/dev/null 2>&1 || true
+
+exit 0

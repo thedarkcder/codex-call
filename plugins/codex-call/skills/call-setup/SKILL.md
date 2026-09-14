@@ -9,17 +9,22 @@ Set up the audio layer that lets Codex make phone calls.
 
 ## Steps
 
-1. Locate the plugin repository root (the directory containing `scripts/install.sh`).
-2. Run the installer:
+1. Prefer the signed, notarized `CodexCall-<version>.pkg` from the latest GitHub
+   release. Open it with macOS Installer and let the user approve Installer's
+   standard authorization request.
+2. For a source checkout, build the same package and open it:
 
    ```bash
-   scripts/install.sh
+   installer/build-pkg.sh
+   open dist/CodexCall-<version>.pkg
    ```
 
-   This builds the `Codex Virtual RX` / `Codex Virtual TX` Core Audio driver and the
-   routing helper, installs the driver (requires an administrator password), configures
-   the system default audio devices, and installs the router agent.
-3. Run diagnostics:
+   Do not install components with `sudo`, temporary shell scripts, AppleScript
+   authorization, or direct copies into `/Library` and `/usr/local`. The signed
+   package is the only supported privileged installation and upgrade path.
+3. Open `/Applications/Codex Call.app`. The app performs user-level setup,
+   refreshes the Codex plugin, and starts the router without an admin prompt.
+4. Run diagnostics:
 
    ```bash
    codex-call-helper doctor
@@ -63,7 +68,10 @@ tccutil reset AudioCapture com.codexcall.helper
 
 ## Notes
 
-- The installer needs `sudo` for the Core Audio driver. Ask the user before running it.
+- macOS Installer owns administrator authorization for the Core Audio driver;
+  Codex Call never asks for or handles the password itself.
+- Use the app's **Check for Updates…** command for upgrades. It verifies the
+  downloaded package's Developer ID Installer team before opening Installer.
 - If `Codex Virtual RX`/`Codex Virtual TX` are missing after install, `coreaudiod` may
-  need a restart (`sudo launchctl kickstart -k system/com.apple.audio.coreaudiod`).
+  need a restart. Re-run the package rather than issuing privileged repair commands.
 - Never claim setup succeeded unless `doctor` reports all checks OK.

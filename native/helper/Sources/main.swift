@@ -129,6 +129,9 @@ func setDefaultDevice(_ selector: AudioObjectPropertySelector, _ id: AudioDevice
 
 func defaultInput() -> AudioDeviceID { defaultDevice(kAudioHardwarePropertyDefaultInputDevice) }
 func defaultOutput() -> AudioDeviceID { defaultDevice(kAudioHardwarePropertyDefaultOutputDevice) }
+func defaultSystemOutput() -> AudioDeviceID {
+    defaultDevice(kAudioHardwarePropertyDefaultSystemOutputDevice)
+}
 
 func clockDeviceUID(fallback: String) -> String {
     if let id = findDevice(named: virtualClockName) { return deviceUID(id) }
@@ -145,7 +148,7 @@ func findDevice(uid: String) -> AudioDeviceID? {
 
 func isVirtual(_ id: AudioDeviceID) -> Bool {
     let name = deviceName(id)
-    return name == virtualRXName || name == virtualTXName
+    return name == virtualRXName || name == virtualTXName || name == virtualClockName
 }
 
 func jsonString(_ object: [String: Any]) -> String {
@@ -169,6 +172,7 @@ struct CallConfig: Codable {
     var physicalOutputName: String
     var originalDefaultInputUID: String?
     var originalDefaultOutputUID: String?
+    var originalDefaultSystemOutputUID: String?
     var virtualRXName: String
     var virtualTXName: String
     var mode: String
@@ -209,7 +213,12 @@ func helperRunning() -> (Bool, Int32?) {
           let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
         return (false, nil)
     }
-    if kill(pid, 0) == 0 { return (true, pid) }
+    var buffer = [CChar](repeating: 0, count: 4096)
+    let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+    if kill(pid, 0) == 0, length > 0,
+       String(cString: buffer).hasSuffix("/codex-call-helper") {
+        return (true, pid)
+    }
     return (false, pid)
 }
 
@@ -294,7 +303,8 @@ final class Scratch {
     var data: [Float] = []
 }
 
-func inputToRing(_ inputData: UnsafePointer<AudioBufferList>, ring: RingBuffer, scratch: Scratch) {
+func inputToRings(_ inputData: UnsafePointer<AudioBufferList>, rings: [RingBuffer], scratch: Scratch) {
+    guard !rings.isEmpty else { return }
     let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
     guard list.count > 0 else { return }
     var totalChannels = 0
@@ -327,9 +337,15 @@ func inputToRing(_ inputData: UnsafePointer<AudioBufferList>, ring: RingBuffer, 
     }
     scratch.data.withUnsafeBufferPointer { source in
         if let base = source.baseAddress {
-            ring.write(base, frames: frames, srcChannels: totalChannels)
+            for ring in rings {
+                ring.write(base, frames: frames, srcChannels: totalChannels)
+            }
         }
     }
+}
+
+func inputToRing(_ inputData: UnsafePointer<AudioBufferList>, ring: RingBuffer, scratch: Scratch) {
+    inputToRings(inputData, rings: [ring], scratch: scratch)
 }
 
 func ringToOutput(_ outputData: UnsafeMutablePointer<AudioBufferList>, ring: RingBuffer, scratch: Scratch) {
@@ -370,6 +386,72 @@ func ringToOutput(_ outputData: UnsafeMutablePointer<AudioBufferList>, ring: Rin
     }
 }
 
+final class MixerScratch {
+    var mix: [Float] = []
+    var source: [Float] = []
+}
+
+func mixRings(
+    _ rings: [RingBuffer],
+    into mixBase: UnsafeMutablePointer<Float>,
+    frames: Int,
+    channels: Int,
+    scratch: MixerScratch
+) {
+    let needed = frames * channels
+    if scratch.source.count < needed { scratch.source = [Float](repeating: 0, count: needed) }
+    for index in 0..<needed { mixBase[index] = 0 }
+    for ring in rings {
+        scratch.source.withUnsafeMutableBufferPointer { source in
+            guard let sourceBase = source.baseAddress else { return }
+            ring.read(into: sourceBase, frames: frames, dstChannels: channels)
+            for index in 0..<needed {
+                mixBase[index] = max(-1, min(1, mixBase[index] + sourceBase[index]))
+            }
+        }
+    }
+}
+
+func ringsToOutput(
+    _ outputData: UnsafeMutablePointer<AudioBufferList>,
+    rings: [RingBuffer],
+    scratch: MixerScratch
+) {
+    let list = UnsafeMutableAudioBufferListPointer(outputData)
+    guard list.count > 0 else { return }
+    var totalChannels = 0
+    for buffer in list { totalChannels += Int(buffer.mNumberChannels) }
+    guard totalChannels > 0 else { return }
+    let first = list[0]
+    let firstChannels = max(1, Int(first.mNumberChannels))
+    let frames = Int(first.mDataByteSize) / (MemoryLayout<Float>.size * firstChannels)
+    guard frames > 0 else { return }
+    let needed = frames * totalChannels
+    if scratch.mix.count < needed { scratch.mix = [Float](repeating: 0, count: needed) }
+
+    scratch.mix.withUnsafeMutableBufferPointer { mix in
+        guard let mixBase = mix.baseAddress else { return }
+        mixRings(rings, into: mixBase, frames: frames, channels: totalChannels, scratch: scratch)
+    }
+
+    scratch.mix.withUnsafeBufferPointer { mix in
+        guard let base = mix.baseAddress else { return }
+        var channelOffset = 0
+        for buffer in list {
+            let channels = Int(buffer.mNumberChannels)
+            guard let raw = buffer.mData, channels > 0 else { continue }
+            let destination = raw.assumingMemoryBound(to: Float.self)
+            for frame in 0..<frames {
+                for channel in 0..<channels {
+                    destination[frame * channels + channel] =
+                        base[frame * totalChannels + channelOffset + channel]
+                }
+            }
+            channelOffset += channels
+        }
+    }
+}
+
 enum RouterError: Error {
     case ioProc(String)
 }
@@ -383,28 +465,43 @@ final class Router {
     private var procs: [(AudioDeviceID, AudioDeviceIOProcID)] = []
     private var rings: [RingBuffer] = []
     private var scratches: [Scratch] = []
+    private var mixerScratches: [MixerScratch] = []
     private(set) var running = false
 
     func start(links: [Link]) throws {
         stop()
-        for link in links {
-            let ring = RingBuffer(channels: 8, capacityFrames: 96_000)
-            let captureScratch = Scratch()
-            let renderScratch = Scratch()
-            rings.append(ring)
-            scratches.append(captureScratch)
-            scratches.append(renderScratch)
-            try addCapture(link.source, ring: ring, scratch: captureScratch)
-            try addRender(link.destination, ring: ring, scratch: renderScratch)
+        do {
+            var sourceRings: [AudioDeviceID: [RingBuffer]] = [:]
+            var destinationRings: [AudioDeviceID: [RingBuffer]] = [:]
+            for link in links {
+                let ring = RingBuffer(channels: 8, capacityFrames: 96_000)
+                rings.append(ring)
+                sourceRings[link.source, default: []].append(ring)
+                destinationRings[link.destination, default: []].append(ring)
+            }
+            for (source, sourceLinks) in sourceRings {
+                let scratch = Scratch()
+                scratches.append(scratch)
+                try addCapture(source, rings: sourceLinks, scratch: scratch)
+            }
+            for (destination, destinationLinks) in destinationRings {
+                let scratch = MixerScratch()
+                mixerScratches.append(scratch)
+                try addRender(destination, rings: destinationLinks, scratch: scratch)
+            }
+            running = true
+        } catch {
+            // Never leave a half-built graph running after one endpoint fails.
+            stop()
+            throw error
         }
-        running = true
     }
 
-    private func addCapture(_ device: AudioDeviceID, ring: RingBuffer, scratch: Scratch) throws {
+    private func addCapture(_ device: AudioDeviceID, rings: [RingBuffer], scratch: Scratch) throws {
         var procID: AudioDeviceIOProcID?
         let status = AudioDeviceCreateIOProcIDWithBlock(&procID, device, nil) {
             _, inputData, _, _, _ in
-            inputToRing(inputData, ring: ring, scratch: scratch)
+            inputToRings(inputData, rings: rings, scratch: scratch)
         }
         guard status == noErr, let proc = procID else {
             throw RouterError.ioProc("capture \(deviceName(device)): \(status)")
@@ -416,11 +513,11 @@ final class Router {
         procs.append((device, proc))
     }
 
-    private func addRender(_ device: AudioDeviceID, ring: RingBuffer, scratch: Scratch) throws {
+    private func addRender(_ device: AudioDeviceID, rings: [RingBuffer], scratch: MixerScratch) throws {
         var procID: AudioDeviceIOProcID?
         let status = AudioDeviceCreateIOProcIDWithBlock(&procID, device, nil) {
             _, _, _, outputData, _ in
-            ringToOutput(outputData, ring: ring, scratch: scratch)
+            ringsToOutput(outputData, rings: rings, scratch: scratch)
         }
         guard status == noErr, let proc = procID else {
             throw RouterError.ioProc("render \(deviceName(device)): \(status)")
@@ -438,6 +535,9 @@ final class Router {
             AudioDeviceDestroyIOProcID(device, proc)
         }
         procs.removeAll()
+        rings.removeAll()
+        scratches.removeAll()
+        mixerScratches.removeAll()
         running = false
     }
 }
@@ -500,6 +600,7 @@ func commandStatus(json: Bool) {
     let (running, pid) = helperRunning()
     let rx = findDevice(named: virtualRXName)
     let tx = findDevice(named: virtualTXName)
+    let clock = findDevice(named: virtualClockName)
     let config = loadConfig()
     if json {
         print(jsonString([
@@ -512,6 +613,7 @@ func commandStatus(json: Bool) {
             "helperPid": pid.map { Int($0) } ?? NSNull(),
             "virtualRX": rx.map { deviceName($0) } ?? NSNull(),
             "virtualTX": tx.map { deviceName($0) } ?? NSNull(),
+            "virtualClock": clock.map { deviceName($0) } ?? NSNull(),
             "physicalInput": config?.physicalInputName ?? NSNull(),
             "physicalOutput": config?.physicalOutputName ?? NSNull(),
         ]))
@@ -526,6 +628,7 @@ func commandStatus(json: Bool) {
 func commandAudioStatus(json: Bool) {
     let rx = findDevice(named: virtualRXName)
     let tx = findDevice(named: virtualTXName)
+    let clock = findDevice(named: virtualClockName)
     let config = loadConfig()
     let (running, pid) = helperRunning()
     let input = defaultInput()
@@ -543,6 +646,7 @@ func commandAudioStatus(json: Bool) {
             "helperPid": pid.map { Int($0) } ?? NSNull(),
             "virtualRX": rx != nil,
             "virtualTX": tx != nil,
+            "virtualClock": clock != nil,
             "mode": state.mode.uppercased(),
             "physicalInput": config?.physicalInputName ?? deviceName(input),
             "physicalOutput": config?.physicalOutputName ?? deviceName(output),
@@ -559,6 +663,7 @@ func commandAudioStatus(json: Bool) {
     print("Native helper: \(running ? "running" : "not running")")
     print("Virtual RX: \(rx != nil ? "found" : "missing")")
     print("Virtual TX: \(tx != nil ? "found" : "missing")")
+    print("Virtual Clock: \(clock != nil ? "found" : "missing")")
     print("")
     print("Mode: \(state.mode.uppercased())")
     print("")
@@ -579,8 +684,10 @@ func commandAudioStatus(json: Bool) {
 }
 
 func commandSetup(argv: [String], json: Bool) {
-    guard let rx = findDevice(named: virtualRXName), let tx = findDevice(named: virtualTXName) else {
-        let message = "Codex Virtual RX/TX not found. Install the virtual audio driver first."
+    guard let rx = findDevice(named: virtualRXName),
+          let tx = findDevice(named: virtualTXName),
+          findDevice(named: virtualClockName) != nil else {
+        let message = "Codex Virtual RX/TX/Clock not found. Install the virtual audio driver first."
         if json { print(jsonString(["ok": false, "error": message])) } else { print(message) }
         exit(2)
     }
@@ -598,8 +705,12 @@ func commandSetup(argv: [String], json: Bool) {
     let existing = loadConfig()
     let currentInput = defaultInput()
     let currentOutput = defaultOutput()
+    let currentSystemOutput = defaultSystemOutput()
     let originalInput = (isVirtual(currentInput) ? existing?.originalDefaultInputUID : deviceUID(currentInput)) ?? existing?.originalDefaultInputUID
     let originalOutput = (isVirtual(currentOutput) ? existing?.originalDefaultOutputUID : deviceUID(currentOutput)) ?? existing?.originalDefaultOutputUID
+    let originalSystemOutput = (isVirtual(currentSystemOutput)
+        ? existing?.originalDefaultSystemOutputUID
+        : deviceUID(currentSystemOutput)) ?? existing?.originalDefaultSystemOutputUID
 
     let config = CallConfig(
         physicalInputUID: deviceUID(input),
@@ -608,6 +719,7 @@ func commandSetup(argv: [String], json: Bool) {
         physicalOutputName: deviceName(output),
         originalDefaultInputUID: originalInput,
         originalDefaultOutputUID: originalOutput,
+        originalDefaultSystemOutputUID: originalSystemOutput,
         virtualRXName: virtualRXName,
         virtualTXName: virtualTXName,
         mode: "normal"
@@ -654,6 +766,10 @@ func commandRestore(json: Bool) {
         setDefaultDevice(kAudioHardwarePropertyDefaultOutputDevice, id)
         restored = true
     }
+    if let uid = config?.originalDefaultSystemOutputUID, let id = findDevice(uid: uid) {
+        setDefaultDevice(kAudioHardwarePropertyDefaultSystemOutputDevice, id)
+        restored = true
+    }
     saveState(CallState(mode: "normal", state: "NORMAL", goal: nil, number: nil))
     if json {
         print(jsonString([
@@ -668,11 +784,12 @@ func commandRestore(json: Bool) {
     print("Restored default output: \(deviceName(defaultOutput()))")
 }
 
-let callAppBundleIDs = ["com.apple.FaceTime", "com.apple.mobilephone", "com.apple.Phone", "com.apple.avconferenced", "com.apple.TelephonyUtilities"]
+let callUIBundleIDs = ["com.apple.FaceTime", "com.apple.mobilephone", "com.apple.Phone"]
+let callServiceBundleIDs = ["com.apple.avconferenced", "com.apple.TelephonyUtilities"]
+let callAppBundleIDs = callUIBundleIDs + callServiceBundleIDs
 
 func callUIAppRunning() -> Bool {
-    processObjectID(forBundleID: "com.apple.mobilephone") != nil
-        || processObjectID(forBundleID: "com.apple.FaceTime") != nil
+    processObjectIDs().contains { callUIBundleIDs.contains(processBundleID($0)) }
 }
 
 func callAppProcessObjects() -> [AudioObjectID] {
@@ -680,7 +797,29 @@ func callAppProcessObjects() -> [AudioObjectID] {
        let pid = pid_t(pidString), let object = processObjectID(forPID: pid) {
         return [object]
     }
-    return processObjectIDs().filter { callAppBundleIDs.contains(processBundleID($0)) }
+    let processes = processObjectIDs()
+    let direct = processes.filter { callUIBundleIDs.contains(processBundleID($0)) }
+    let activeServices = processes.filter {
+        callServiceBundleIDs.contains(processBundleID($0))
+            && (processIsRunningInput($0) || processIsRunningOutput($0))
+    }
+    if !direct.isEmpty { return direct + activeServices }
+    let services = processes.filter { callServiceBundleIDs.contains(processBundleID($0)) }
+    return activeServices.isEmpty ? services : activeServices
+}
+
+func callAudioActive() -> Bool {
+    let processes = processObjectIDs()
+    let direct = processes.filter { callUIBundleIDs.contains(processBundleID($0)) }
+    if direct.contains(where: { processIsRunningInput($0) || processIsRunningOutput($0) }) {
+        return true
+    }
+    // avconferenced can also be active for unrelated apps. Treat it as call audio
+    // only while a Phone/FaceTime audio process is present.
+    return !direct.isEmpty && processes.contains {
+        callServiceBundleIDs.contains(processBundleID($0))
+            && (processIsRunningInput($0) || processIsRunningOutput($0))
+    }
 }
 
 func commandRun(argv: [String], json: Bool) {
@@ -710,11 +849,16 @@ func commandRun(argv: [String], json: Bool) {
     var tapID = AudioObjectID(0)
     var aggregateID = AudioObjectID(0)
     var physicalOutput = output
-    var clockUID = clockDeviceUID(fallback: deviceUID(physicalOutput))
+    let clockUID = clockDeviceUID(fallback: deviceUID(physicalOutput))
+    var tappedProcessIDs = Set<AudioObjectID>()
 
-    func teardownTap() {
-        if tapID != 0 { AudioHardwareDestroyProcessTap(tapID); tapID = 0 }
+    func teardownTap(stopRouting: Bool = true) {
+        if stopRouting { router.stop() }
+        // The aggregate owns the tap stream. Destroy it before the tap, and never
+        // while an IOProc is still reading from it.
         if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID); aggregateID = 0 }
+        if tapID != 0 { AudioHardwareDestroyProcessTap(tapID); tapID = 0 }
+        tappedProcessIDs.removeAll()
     }
 
     func rebuild() {
@@ -723,11 +867,17 @@ func commandRun(argv: [String], json: Bool) {
             if mode == "call" {
                 if aggregateID != 0 {
                     links.append(Router.Link(source: aggregateID, destination: rx))
+                    // A muted process tap removes the call app from the system mix.
+                    // Mirror it locally so the owner can hear the remote participant.
+                    links.append(Router.Link(source: aggregateID, destination: physicalOutput))
                 }
+                // TX is consumed by the phone as its microphone and mirrored locally
+                // so the owner can also hear Codex. Router mixes both speaker links
+                // into one physical-output IOProc.
                 links.append(Router.Link(source: tx, destination: physicalOutput))
             } else {
                 links.append(Router.Link(source: input, destination: rx))
-                links.append(Router.Link(source: tx, destination: output))
+                links.append(Router.Link(source: tx, destination: physicalOutput))
             }
             try router.start(links: links)
         } catch {
@@ -775,6 +925,7 @@ func commandRun(argv: [String], json: Bool) {
         }
         tapID = tap
         aggregateID = aggregate
+        tappedProcessIDs = Set(processes)
         print("tap: attached to \(bundle)")
         fflush(stdout)
     }
@@ -847,7 +998,9 @@ func commandRun(argv: [String], json: Bool) {
 
     var lastProcessLog = Date.distantPast
     var callUIWasSeen = false
-    var callUIIdleSince: Date?
+    var callAudioWasActive = false
+    var callAudioIdleSince: Date?
+    var callModeStartedAt = Date()
     let timer = DispatchSource.makeTimerSource(queue: workQueue)
     timer.schedule(deadline: .now() + 1, repeating: 1)
     timer.setEventHandler {
@@ -855,31 +1008,57 @@ func commandRun(argv: [String], json: Bool) {
         let desired = loadState().mode == "call" ? "call" : "normal"
         if desired != mode {
             switchMode(desired)
+            callModeStartedAt = Date()
+            callUIWasSeen = false
+            callAudioWasActive = false
+            callAudioIdleSince = nil
         } else if mode == "call" && aggregateID == 0 {
             let before = aggregateID
             attachTapIfPossible()
             if aggregateID != before { rebuild() }
         }
         if mode == "call" {
+            let currentProcessIDs = Set(callAppProcessObjects())
+            if aggregateID != 0, !currentProcessIDs.isEmpty, currentProcessIDs != tappedProcessIDs {
+                print("tap: call audio process changed; rebuilding")
+                fflush(stdout)
+                teardownTap()
+                attachTapIfPossible()
+                rebuild()
+            }
+
             if callUIAppRunning() {
                 callUIWasSeen = true
-                callUIIdleSince = nil
-            } else if callUIWasSeen {
-                if callUIIdleSince == nil {
-                    callUIIdleSince = Date()
-                } else if Date().timeIntervalSince(callUIIdleSince!) > 5 {
+            }
+
+            let audioActive = callAudioActive()
+            if audioActive {
+                if !callAudioWasActive {
                     var state = loadState()
-                    state.mode = "normal"
-                    state.state = "NORMAL"
-                    state.goal = nil
-                    state.number = nil
+                    state.state = "IN_CALL"
                     saveState(state)
-                    switchMode("normal")
-                    callUIWasSeen = false
-                    callUIIdleSince = nil
-                    print("call ended (call app closed); restored normal mode")
+                    print("call audio active; state is IN_CALL")
                     fflush(stdout)
                 }
+                callAudioWasActive = true
+                callAudioIdleSince = nil
+            } else if callAudioWasActive || (callUIWasSeen && !callUIAppRunning()) {
+                if callAudioIdleSince == nil {
+                    callAudioIdleSince = Date()
+                } else if Date().timeIntervalSince(callAudioIdleSince!) > 5 {
+                    saveState(CallState(mode: "normal", state: "NORMAL", goal: nil, number: nil))
+                    switchMode("normal")
+                    callUIWasSeen = false
+                    callAudioWasActive = false
+                    callAudioIdleSince = nil
+                    print("call audio ended; restored normal mode")
+                    fflush(stdout)
+                }
+            } else if Date().timeIntervalSince(callModeStartedAt) > 120 {
+                saveState(CallState(mode: "normal", state: "ERROR", goal: nil, number: nil))
+                switchMode("normal")
+                print("call never opened audio; restored normal mode")
+                fflush(stdout)
             }
             if Date().timeIntervalSince(lastProcessLog) > 3 {
                 lastProcessLog = Date()
@@ -895,8 +1074,8 @@ func commandRun(argv: [String], json: Bool) {
 
     semaphore.wait()
     timer.cancel()
-    teardownTap()
     router.stop()
+    teardownTap(stopRouting: false)
     clearPID()
 
     if let uid = config.originalDefaultInputUID, let id = findDevice(uid: uid) {
@@ -904,6 +1083,9 @@ func commandRun(argv: [String], json: Bool) {
     }
     if let uid = config.originalDefaultOutputUID, let id = findDevice(uid: uid) {
         setDefaultDevice(kAudioHardwarePropertyDefaultOutputDevice, id)
+    }
+    if let uid = config.originalDefaultSystemOutputUID, let id = findDevice(uid: uid) {
+        setDefaultDevice(kAudioHardwarePropertyDefaultSystemOutputDevice, id)
     }
     print("Router stopped; default audio devices restored.")
 }
@@ -915,6 +1097,8 @@ func commandRoute(argv: [String], json: Bool) {
         var state = loadState()
         state.mode = "normal"
         state.state = "NORMAL"
+        state.goal = nil
+        state.number = nil
         saveState(state)
         enterNormalModeDefaults()
         if json { print(jsonString(["ok": true, "mode": "normal"])) } else { print("Audio routing set to normal mode.") }
@@ -935,6 +1119,7 @@ func commandRoute(argv: [String], json: Bool) {
 func commandDoctor(json: Bool) {
     let rx = findDevice(named: virtualRXName)
     let tx = findDevice(named: virtualTXName)
+    let clock = findDevice(named: virtualClockName)
     let config = loadConfig()
     let (running, pid) = helperRunning()
     let input = defaultInput()
@@ -950,6 +1135,7 @@ func commandDoctor(json: Bool) {
     let checks: [(String, Bool, String)] = [
         ("Virtual RX", rx != nil, rx != nil ? virtualRXName : "missing"),
         ("Virtual TX", tx != nil, tx != nil ? virtualTXName : "missing"),
+        ("Virtual Clock", clock != nil, clock != nil ? virtualClockName : "missing"),
         ("Physical microphone", config != nil, config?.physicalInputName ?? "not configured"),
         ("Physical output", config != nil, config?.physicalOutputName ?? "not configured"),
         ("Default input is \(expectedInputName)", inputDefault, deviceName(input)),
@@ -1129,6 +1315,35 @@ func commandRingtest(json: Bool) {
     } else {
         print("Ring test: rms=\(String(format: "%.5f", rms)) expected=0.25000")
     }
+}
+
+func commandGraphtest(json: Bool) {
+    let frames = 480
+    let first = RingBuffer(channels: 8, capacityFrames: 96_000)
+    let second = RingBuffer(channels: 8, capacityFrames: 96_000)
+    let firstSource = [Float](repeating: 0.25, count: frames)
+    let secondSource = [Float](repeating: 0.50, count: frames)
+    firstSource.withUnsafeBufferPointer { buffer in
+        if let base = buffer.baseAddress { first.write(base, frames: frames, srcChannels: 1) }
+    }
+    secondSource.withUnsafeBufferPointer { buffer in
+        if let base = buffer.baseAddress { second.write(base, frames: frames, srcChannels: 1) }
+    }
+    var mixed = [Float](repeating: 0, count: frames * 2)
+    let scratch = MixerScratch()
+    mixed.withUnsafeMutableBufferPointer { buffer in
+        if let base = buffer.baseAddress {
+            mixRings([first, second], into: base, frames: frames, channels: 2, scratch: scratch)
+        }
+    }
+    let mean = mixed.reduce(0.0) { $0 + Double($1) } / Double(mixed.count)
+    let ok = abs(mean - 0.75) < 0.000_001
+    if json {
+        print(jsonString(["ok": ok, "mean": mean, "expected": 0.75]))
+    } else {
+        print("Graph mix test: mean=\(String(format: "%.5f", mean)) expected=0.75000")
+    }
+    if !ok { exit(1) }
 }
 
 var retainedWindow: NSWindow?
@@ -1347,6 +1562,7 @@ func commandTap(argv: [String], json: Bool) {
     }
 
     guard captureStatus == noErr, let capture = captureProc else {
+        AudioHardwareDestroyAggregateDevice(aggregate)
         AudioHardwareDestroyProcessTap(tapID)
         if json { print(jsonString(["ok": false, "error": "cannot capture tap"])) } else { print("Cannot capture tap.") }
         exit(3)
@@ -1359,6 +1575,7 @@ func commandTap(argv: [String], json: Bool) {
         AudioDeviceStop(device, proc)
         AudioDeviceDestroyIOProcID(device, proc)
     }
+    AudioHardwareDestroyAggregateDevice(aggregate)
     AudioHardwareDestroyProcessTap(tapID)
 
     let result = meterBox.snapshot()
@@ -1458,6 +1675,22 @@ func initiateCall(number: String) -> Bool {
     return NSWorkspace.shared.open(url)
 }
 
+func terminateCallApplications(timeout: TimeInterval = 3) -> Bool {
+    let applications = NSWorkspace.shared.runningApplications.filter {
+        guard let bundleID = $0.bundleIdentifier else { return false }
+        return callUIBundleIDs.contains(bundleID)
+    }
+    guard !applications.isEmpty else { return true }
+    for application in applications { application.terminate() }
+
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if applications.allSatisfy({ $0.isTerminated }) { return true }
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+    return applications.allSatisfy { $0.isTerminated }
+}
+
 func enterCallModeDefaults() {
     guard let config = loadConfig(),
           let tx = findDevice(named: config.virtualTXName) else { return }
@@ -1479,6 +1712,11 @@ func commandCall(argv: [String], json: Bool) {
     let action = argv.count > 1 && !argv[1].hasPrefix("--") ? argv[1] : ""
     switch action {
     case "start":
+        guard findDevice(named: virtualClockName) != nil else {
+            let message = "Codex Virtual Clock is missing; reinstall Codex Call before placing a call."
+            if json { print(jsonString(["ok": false, "error": message])) } else { print(message) }
+            exit(2)
+        }
         guard let rawNumber = option("--number", argv), let number = sanitizePhoneNumber(rawNumber) else {
             let message = "A valid phone number is required."
             if json { print(jsonString(["ok": false, "error": message])) } else { print(message) }
@@ -1492,15 +1730,25 @@ func commandCall(argv: [String], json: Bool) {
         saveState(CallState(mode: "call", state: "STARTING_CALL", goal: goal, number: number))
         enterCallModeDefaults()
         let started = initiateCall(number: number)
-        saveState(CallState(mode: "call", state: started ? "IN_CALL" : "ERROR", goal: goal, number: number))
+        saveState(CallState(
+            mode: started ? "call" : "normal",
+            state: started ? "STARTING_CALL" : "ERROR",
+            goal: goal,
+            number: number
+        ))
+        if !started { enterNormalModeDefaults() }
         if json {
-            print(jsonString(["ok": started, "state": started ? "IN_CALL" : "ERROR", "number": number, "goal": goal]))
+            print(jsonString(["ok": started, "state": started ? "STARTING_CALL" : "ERROR", "number": number, "goal": goal]))
         } else if started {
-            print("Calling \(number).\nGoal: \(goal)\nState: IN_CALL")
+            print("Calling \(number).\nGoal: \(goal)\nState: STARTING_CALL")
         } else {
             print("Failed to initiate call to \(number).")
         }
     case "end":
+        var ending = loadState()
+        ending.state = "ENDING_CALL"
+        saveState(ending)
+        let hungUp = terminateCallApplications()
         var state = loadState()
         state.mode = "normal"
         state.state = "NORMAL"
@@ -1508,7 +1756,13 @@ func commandCall(argv: [String], json: Bool) {
         state.number = nil
         saveState(state)
         enterNormalModeDefaults()
-        if json { print(jsonString(["ok": true, "state": "NORMAL"])) } else { print("Call ended. Normal mode restored.") }
+        if json {
+            print(jsonString(["ok": true, "state": "NORMAL", "hungUp": hungUp]))
+        } else if hungUp {
+            print("Call ended. Normal mode restored.")
+        } else {
+            print("Normal mode restored, but macOS did not confirm that the call app closed.")
+        }
     default:
         let message = "call requires 'start' or 'end'."
         if json { print(jsonString(["ok": false, "error": message])) } else { print(message) }
@@ -1533,6 +1787,7 @@ case "selftest": commandSelftest(json: json)
 case "set-default": commandSetDefault(argv: argv, json: json)
 case "loopback": commandLoopback(argv: argv, json: json)
 case "ringtest": commandRingtest(json: json)
+case "graphtest": commandGraphtest(json: json)
 case "request-mic": commandRequestMic(json: json)
 case "tap": commandTap(argv: argv, json: json)
 case "processes": commandProcesses(json: json)

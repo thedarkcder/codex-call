@@ -22,6 +22,7 @@ Run the diagnostics and audio self-test.
    Native helper: running
    Virtual RX: found
    Virtual TX: found
+   Virtual Clock: found
 
    Mode: NORMAL
 
@@ -66,3 +67,5 @@ Run the diagnostics and audio self-test.
 
 - Never report success unless `doctor` returns all checks OK.
 - The router must be running for audio to pass through `Codex Virtual RX`/`TX`.
+- `doctor` must also find `Codex Virtual Clock`; call mode no longer falls back to
+  clocking its tap from the physical speaker device.

@@ -1,18 +1,45 @@
 import AppKit
 import AVFoundation
+import Darwin
 
 let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/CodexCall", isDirectory: true)
+
+struct GitHubRelease: Decodable {
+    struct Asset: Decodable {
+        let name: String
+        let browserDownloadURL: URL
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case browserDownloadURL = "browser_download_url"
+        }
+    }
+
+    let tagName: String
+    let htmlURL: URL
+    let assets: [Asset]
+
+    enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
+        case htmlURL = "html_url"
+        case assets
+    }
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var statusItem: NSStatusItem!
     var statusMenu: NSMenu!
+    var menuStateItem: NSMenuItem!
+    var menuStartItem: NSMenuItem!
+    var menuStopItem: NSMenuItem!
+    var menuUpdateItem: NSMenuItem!
 
     let stateLabel = NSTextField(labelWithString: "Checking…")
     let detailLabel = NSTextField(labelWithString: "")
     let modeLabel = NSTextField(labelWithString: "")
-    let installButton = NSButton(title: "Install", target: nil, action: nil)
+    let installButton = NSButton(title: "Check for Updates…", target: nil, action: nil)
     let startButton = NSButton(title: "Start Routing", target: nil, action: nil)
     let stopButton = NSButton(title: "Stop Routing", target: nil, action: nil)
     let quitButton = NSButton(title: "Quit", target: nil, action: nil)
@@ -32,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.ensureRouter()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.installIfNeeded()
+            self?.configureIfReady()
         }
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -47,10 +74,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(systemSymbolName: "phone.fill", accessibilityDescription: "Codex Call")
         statusMenu = NSMenu()
+        menuStateItem = NSMenuItem(title: "Checking…", action: nil, keyEquivalent: "")
+        menuStateItem.isEnabled = false
+        statusMenu.addItem(menuStateItem)
+        statusMenu.addItem(.separator())
         statusMenu.addItem(NSMenuItem(title: "Show Codex Call", action: #selector(showWindow), keyEquivalent: ""))
         statusMenu.addItem(.separator())
-        statusMenu.addItem(NSMenuItem(title: "Start Routing", action: #selector(startRouterAction), keyEquivalent: ""))
-        statusMenu.addItem(NSMenuItem(title: "Stop Routing", action: #selector(stopRouterAction), keyEquivalent: ""))
+        menuStartItem = NSMenuItem(title: "Start Routing", action: #selector(startRouterAction), keyEquivalent: "")
+        menuStopItem = NSMenuItem(title: "Stop Routing", action: #selector(stopRouterAction), keyEquivalent: "")
+        statusMenu.addItem(menuStartItem)
+        statusMenu.addItem(menuStopItem)
+        statusMenu.addItem(.separator())
+        menuUpdateItem = NSMenuItem(title: "Check for Updates…", action: #selector(installAction), keyEquivalent: "")
+        statusMenu.addItem(menuUpdateItem)
         statusMenu.addItem(.separator())
         statusMenu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q"))
         for item in statusMenu.items { item.target = self }
@@ -110,11 +146,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
+    func setDisplayedStatus(_ state: String, detail: String) {
+        stateLabel.stringValue = state
+        detailLabel.stringValue = detail
+        menuStateItem.title = state
+        statusItem.button?.toolTip = state
+    }
+
+    func setUpdateAction(title: String, enabled: Bool) {
+        installButton.title = title
+        installButton.isEnabled = enabled
+        menuUpdateItem.title = title
+        menuUpdateItem.isEnabled = enabled
+    }
+
+    func syncMenuActions() {
+        menuStartItem.isEnabled = startButton.isEnabled
+        menuStopItem.isEnabled = stopButton.isEnabled
+        menuUpdateItem.title = installButton.title
+        menuUpdateItem.isEnabled = installButton.isEnabled
+    }
+
     func helperPath() -> String {
-        if let path = Bundle.main.path(forResource: "codex-call-helper", ofType: nil) {
-            return path
+        let installedAppHelper = "/usr/local/lib/codex-call/CodexCallHelper.app/Contents/MacOS/codex-call-helper"
+        if FileManager.default.isExecutableFile(atPath: installedAppHelper) { return installedAppHelper }
+        return bundledHelperPath() ?? "/usr/local/bin/codex-call-helper"
+    }
+
+    func bundledHelperPath() -> String? {
+        if let app = Bundle.main.resourceURL?.appendingPathComponent(
+            "CodexCallHelper.app/Contents/MacOS/codex-call-helper"
+        ), FileManager.default.isExecutableFile(atPath: app.path) {
+            return app.path
         }
-        return "/usr/local/bin/codex-call-helper"
+        return Bundle.main.path(forResource: "codex-call-helper", ofType: nil)
     }
 
     @discardableResult
@@ -142,106 +207,232 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             && fm.fileExists(atPath: "/Library/Audio/Plug-Ins/HAL/CodexVirtualClock.driver")
     }
 
-    func installIfNeeded() {
-        removeLaunchAgent()
-        if driverInstalled() {
-            if helperNeedsUpdate() { refreshHelper() }
-            refreshStatus()
-            if !isRouterRunning() { startRouter(silent: true) }
-        } else {
-            install()
+    func driverVersionsCurrent() -> Bool {
+        ["CodexVirtualRX.driver", "CodexVirtualTX.driver", "CodexVirtualClock.driver"].allSatisfy { name in
+            let url = URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL").appendingPathComponent(name)
+            return bundleInfoString(at: url, key: "CFBundleShortVersionString") == currentVersion()
         }
     }
 
-    @objc func installAction() { install() }
+    func bundleInfoString(at bundleURL: URL, key: String) -> String? {
+        let plistURL = bundleURL.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: plistURL),
+              let object = try? PropertyListSerialization.propertyList(from: data, format: nil),
+              let dictionary = object as? [String: Any] else {
+            return nil
+        }
+        return dictionary[key] as? String
+    }
 
-    func install() {
+    func componentsCurrent() -> Bool {
+        driverInstalled() && driverVersionsCurrent() && !helperNeedsUpdate()
+    }
+
+    func configureIfReady() {
+        removeLaunchAgent()
+        guard componentsCurrent() else {
+            refreshStatus()
+            return
+        }
+        if !configurationExists() {
+            runHelper(["setup"])
+        }
+        if let plugin = bundledPluginURL(), pluginNeedsUpdate(plugin: plugin) {
+            installPlugin(plugin: plugin)
+        }
+        refreshStatus()
+        if !isRouterRunning() { startRouter(silent: true) }
+    }
+
+    func configurationExists() -> Bool {
+        FileManager.default.fileExists(atPath: appSupportDir.appendingPathComponent("config.json").path)
+    }
+
+    @objc func installAction() { checkForUpdates() }
+
+    func checkForUpdates() {
         guard !busy else { return }
         busy = true
-        installButton.isEnabled = false
-        stateLabel.stringValue = "Installing…"
-        detailLabel.stringValue = "macOS will ask for your password to install the virtual audio driver."
-        DispatchQueue.global().async { [weak self] in
-            guard let self else { return }
-            let ok = self.performInstall()
-            DispatchQueue.main.async {
-                self.busy = false
-                self.installButton.isEnabled = true
-                if ok {
-                    self.runHelper(["setup"])
-                    self.startRouter(silent: true)
-                }
-                self.refreshStatus()
-            }
-        }
-    }
+        setUpdateAction(title: "Checking…", enabled: false)
+        startButton.isEnabled = false
+        syncMenuActions()
+        setDisplayedStatus("Checking for updates…", detail: "Looking for a signed Codex Call installer.")
 
-    @discardableResult
-    func runPrivileged(_ script: String) -> Bool {
-        let scriptURL = FileManager.default.temporaryDirectory.appendingPathComponent("codexcall-priv.sh")
-        try? script.write(to: scriptURL, atomically: true, encoding: .utf8)
-        let appleScript = "do shell script \"/bin/sh '\(scriptURL.path)'\" with administrator privileges"
-        let osa = Process()
-        osa.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        osa.arguments = ["-e", appleScript]
-        do {
-            try osa.run()
-            osa.waitUntilExit()
-        } catch {
-            return false
+        guard let endpoint = URL(string: bundleString("CodexCallReleaseAPIURL", fallback: "https://api.github.com/repos/thedarkcder/codex-call/releases/latest")) else {
+            finishUpdateError("The update service URL is invalid.")
+            return
         }
-        return osa.terminationStatus == 0
+        var request = URLRequest(url: endpoint)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("CodexCall/\(currentVersion())", forHTTPHeaderField: "User-Agent")
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            if let error {
+                DispatchQueue.main.async { self.finishUpdateError("Could not check for updates: \(error.localizedDescription)") }
+                return
+            }
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), let data else {
+                DispatchQueue.main.async { self.finishUpdateError("The update service returned an unexpected response.") }
+                return
+            }
+            do {
+                let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+                DispatchQueue.main.async { self.handleRelease(release) }
+            } catch {
+                DispatchQueue.main.async { self.finishUpdateError("The update response could not be read: \(error.localizedDescription)") }
+            }
+        }.resume()
     }
 
     func helperNeedsUpdate() -> Bool {
-        let installed = "/usr/local/bin/codex-call-helper"
-        let fm = FileManager.default
-        guard let a = try? fm.attributesOfItem(atPath: installed)[.size] as? Int,
-              let b = try? fm.attributesOfItem(atPath: helperPath())[.size] as? Int else {
-            return true
+        let installed = URL(fileURLWithPath: "/usr/local/lib/codex-call/CodexCallHelper.app")
+        let identifier = bundleInfoString(at: installed, key: "CFBundleIdentifier")
+        let version = bundleInfoString(at: installed, key: "CFBundleShortVersionString")
+        return identifier != "com.codexcall.helper" || version != currentVersion()
+    }
+
+    func bundledPluginURL() -> URL? {
+        let url = Bundle.main.resourceURL?.appendingPathComponent("plugin")
+        return url.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+    }
+
+    func pluginVersion(at root: URL) -> String? {
+        let manifest = root.appendingPathComponent(".codex-plugin/plugin.json")
+        guard let data = try? Data(contentsOf: manifest),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
         }
-        return a != b
+        return object["version"] as? String
     }
 
-    func refreshHelper() {
-        guard let helper = Bundle.main.path(forResource: "codex-call-helper", ofType: nil) else { return }
-        let script = """
-        set -e
-        mkdir -p /usr/local/lib/codex-call /usr/local/bin
-        cp "\(helper)" /usr/local/lib/codex-call/codex-call-helper
-        cp "\(helper)" /usr/local/bin/codex-call-helper
-        chmod 755 /usr/local/lib/codex-call/codex-call-helper /usr/local/bin/codex-call-helper
-        """
-        runPrivileged(script)
+    func pluginNeedsUpdate(plugin: URL) -> Bool {
+        let installed = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("plugins/codex-call")
+        return pluginVersion(at: plugin) != pluginVersion(at: installed)
     }
 
-    func performInstall() -> Bool {
-        guard let resources = Bundle.main.resourceURL else { return false }
-        let driverRX = resources.appendingPathComponent("driver/CodexVirtualRX.driver")
-        let driverTX = resources.appendingPathComponent("driver/CodexVirtualTX.driver")
-        let driverClock = resources.appendingPathComponent("driver/CodexVirtualClock.driver")
-        let helper = resources.appendingPathComponent("codex-call-helper")
-        let plugin = resources.appendingPathComponent("plugin")
+    func bundleString(_ key: String, fallback: String) -> String {
+        Bundle.main.object(forInfoDictionaryKey: key) as? String ?? fallback
+    }
 
-        let script = """
-        set -e
-        mkdir -p /Library/Audio/Plug-Ins/HAL
-        rm -rf "/Library/Audio/Plug-Ins/HAL/CodexVirtualRX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualTX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualClock.driver"
-        cp -R "\(driverRX.path)" /Library/Audio/Plug-Ins/HAL/
-        cp -R "\(driverTX.path)" /Library/Audio/Plug-Ins/HAL/
-        cp -R "\(driverClock.path)" /Library/Audio/Plug-Ins/HAL/
-        chown -R root:wheel "/Library/Audio/Plug-Ins/HAL/CodexVirtualRX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualTX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualClock.driver"
-        mkdir -p /usr/local/lib/codex-call /usr/local/bin
-        cp "\(helper.path)" /usr/local/lib/codex-call/codex-call-helper
-        cp "\(helper.path)" /usr/local/bin/codex-call-helper
-        chmod 755 /usr/local/lib/codex-call/codex-call-helper /usr/local/bin/codex-call-helper
-        launchctl kickstart -k system/com.apple.audio.coreaudiod >/dev/null 2>&1 || true
-        """
-        if !runPrivileged(script) { return false }
+    func currentVersion() -> String {
+        bundleString("CFBundleShortVersionString", fallback: "0.0.0")
+    }
 
-        removeLaunchAgent()
-        installPlugin(plugin: plugin)
-        return true
+    func releaseIsNewer(_ tag: String) -> Bool {
+        let latest = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        return latest.compare(currentVersion(), options: .numeric) == .orderedDescending
+    }
+
+    func handleRelease(_ release: GitHubRelease) {
+        let needsInstaller = !componentsCurrent()
+        guard needsInstaller || releaseIsNewer(release.tagName) else {
+            finishUpdateUI()
+            showAlert(title: "Codex Call is up to date", message: "Version \(currentVersion()) is the latest release.")
+            return
+        }
+        guard let package = release.assets.first(where: { $0.name.lowercased().hasSuffix(".pkg") }) else {
+            finishUpdateUI()
+            let alert = NSAlert()
+            alert.messageText = "Installer package unavailable"
+            alert.informativeText = "Release \(release.tagName) does not contain a macOS installer package."
+            alert.addButton(withTitle: "Open Releases")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() == .alertFirstButtonReturn {
+                NSWorkspace.shared.open(release.htmlURL)
+            }
+            return
+        }
+        downloadInstaller(package, releaseTag: release.tagName)
+    }
+
+    func downloadInstaller(_ asset: GitHubRelease.Asset, releaseTag: String) {
+        setDisplayedStatus("Downloading \(releaseTag)…", detail: "The installer signature will be verified before it opens.")
+        URLSession.shared.downloadTask(with: asset.browserDownloadURL) { [weak self] temporaryURL, _, error in
+            guard let self else { return }
+            if let error {
+                DispatchQueue.main.async { self.finishUpdateError("Could not download the installer: \(error.localizedDescription)") }
+                return
+            }
+            guard let temporaryURL else {
+                DispatchQueue.main.async { self.finishUpdateError("The installer download did not produce a file.") }
+                return
+            }
+            do {
+                let updates = appSupportDir.appendingPathComponent("Updates", isDirectory: true)
+                try FileManager.default.createDirectory(at: updates, withIntermediateDirectories: true)
+                let safeName = URL(fileURLWithPath: asset.name).lastPathComponent
+                let destination = updates.appendingPathComponent(safeName)
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: temporaryURL, to: destination)
+                let verification = self.verifyInstaller(at: destination)
+                DispatchQueue.main.async {
+                    guard verification.ok else {
+                        try? FileManager.default.removeItem(at: destination)
+                        self.finishUpdateError("The downloaded installer was rejected. \(verification.message)")
+                        return
+                    }
+                    self.finishUpdateUI()
+                    let alert = NSAlert()
+                    alert.messageText = "Install \(releaseTag)?"
+                    alert.informativeText = "The signed installer has been verified. Installer will request administrator approval; Codex Call itself never asks for or handles your password. The app will quit after Installer opens."
+                    alert.addButton(withTitle: "Open Installer")
+                    alert.addButton(withTitle: "Cancel")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        NSWorkspace.shared.open(destination)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.terminate(nil) }
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async { self.finishUpdateError("Could not save the installer: \(error.localizedDescription)") }
+            }
+        }.resume()
+    }
+
+    func verifyInstaller(at url: URL) -> (ok: Bool, message: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/pkgutil")
+        process.arguments = ["--check-signature", url.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+        } catch {
+            return (false, "Signature verification could not start: \(error.localizedDescription)")
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        let expectedTeam = bundleString("CodexCallExpectedTeamIdentifier", fallback: "9CGENKKT99")
+        let trusted = process.terminationStatus == 0
+            && output.contains("Developer ID Installer:")
+            && output.contains("(\(expectedTeam))")
+        return trusted ? (true, output) : (false, "It is not signed by the expected Developer ID Installer team \(expectedTeam).")
+    }
+
+    func finishUpdateUI() {
+        busy = false
+        setUpdateAction(
+            title: componentsCurrent() ? "Check for Updates…" : "Install / Update…",
+            enabled: true
+        )
+        refreshStatus()
+    }
+
+    func finishUpdateError(_ message: String) {
+        finishUpdateUI()
+        showAlert(title: "Update failed", message: message)
+    }
+
+    func showAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     func removeLaunchAgent() {
@@ -297,14 +488,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func isRouterRunning() -> Bool {
         if let process = helperProcess, process.isRunning { return true }
-        let pidFile = appSupportDir.appendingPathComponent("helper.pid")
-        guard let text = try? String(contentsOf: pidFile, encoding: .utf8),
-              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        guard let pid = routerPID(), isCodexCallHelper(pid: pid) else { return false }
         return kill(pid, 0) == 0
     }
 
+    func routerPID() -> Int32? {
+        let pidFile = appSupportDir.appendingPathComponent("helper.pid")
+        guard let text = try? String(contentsOf: pidFile, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        return pid
+    }
+
+    func isCodexCallHelper(pid: Int32) -> Bool {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return false }
+        return String(cString: buffer).hasSuffix("/codex-call-helper")
+    }
+
     func ensureRouter() {
-        guard !busy, !userStopped, driverInstalled() else { return }
+        guard !busy, !userStopped, componentsCurrent() else { return }
         if !isRouterRunning() { startRouter(silent: true) }
     }
 
@@ -314,8 +517,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func startRouter(silent: Bool) {
-        guard driverInstalled() else {
-            if !silent { install() }
+        guard componentsCurrent() else {
+            if !silent { checkForUpdates() }
             return
         }
         guard !isRouterRunning() else { return }
@@ -325,7 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let logURL = URL(fileURLWithPath: "/tmp/codexcall-app.log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         if let handle = try? FileHandle(forWritingTo: logURL) {
-            try? handle.seekToEnd()
+            _ = try? handle.seekToEnd()
             process.standardOutput = handle
             process.standardError = handle
         }
@@ -333,7 +536,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try process.run()
             helperProcess = process
         } catch {
-            if !silent { detailLabel.stringValue = "Failed to start router: \(error)" }
+            if !silent {
+                setDisplayedStatus("Routing failed", detail: "Failed to start router: \(error)")
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.refreshStatus() }
     }
@@ -347,6 +552,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let process = helperProcess, process.isRunning {
             process.terminate()
             process.waitUntilExit()
+        } else if let pid = routerPID(), isCodexCallHelper(pid: pid), kill(pid, 0) == 0 {
+            kill(pid, SIGTERM)
+            for _ in 0..<20 where kill(pid, 0) == 0 {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
         }
         helperProcess = nil
         runHelper(["restore"])
@@ -376,21 +586,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applyStatus(_ values: [String: Any]) {
         let rx = (values["virtualRX"] as? Bool) ?? false
         let tx = (values["virtualTX"] as? Bool) ?? false
+        let clock = (values["virtualClock"] as? Bool) ?? false
         let running = isRouterRunning()
         let mode = (values["mode"] as? String) ?? "NORMAL"
 
-        if !rx || !tx {
-            stateLabel.stringValue = "Not installed"
-            detailLabel.stringValue = "Click Install to set up the virtual audio driver and helper."
-            installButton.isHidden = false
-        } else if running {
-            stateLabel.stringValue = "Routing active"
-            detailLabel.stringValue = "Codex voice is routed through Codex Virtual RX / TX."
-            installButton.isHidden = true
-        } else {
-            stateLabel.stringValue = "Installed, routing stopped"
-            detailLabel.stringValue = "Click Start Routing to route Codex voice."
-            installButton.isHidden = true
+        let current = rx && tx && clock && componentsCurrent()
+        if !busy {
+            if !current {
+                setDisplayedStatus(
+                    driverInstalled() ? "Update required" : "Not installed",
+                    detail: "Use the signed macOS installer to install or update Codex Call."
+                )
+                setUpdateAction(title: "Install / Update…", enabled: true)
+            } else if running {
+                setDisplayedStatus(
+                    "Routing active",
+                    detail: "Codex voice is routed through Codex Virtual RX / TX."
+                )
+                setUpdateAction(title: "Check for Updates…", enabled: true)
+            } else {
+                setDisplayedStatus(
+                    "Installed, routing stopped",
+                    detail: "Click Start Routing to route Codex voice."
+                )
+                setUpdateAction(title: "Check for Updates…", enabled: true)
+            }
         }
 
         let mic = (values["physicalInput"] as? String) ?? "unknown"
@@ -398,6 +618,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         modeLabel.stringValue = """
         Virtual RX: \(rx ? "OK" : "missing")
         Virtual TX: \(tx ? "OK" : "missing")
+        Virtual Clock: \(clock ? "OK" : "missing")
         Mode: \(mode)
         Physical mic: \(mic)
         Physical output: \(out)
@@ -407,8 +628,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             systemSymbolName: running ? "phone.fill" : "phone",
             accessibilityDescription: "Codex Call"
         )
-        startButton.isEnabled = !running && rx && tx
+        startButton.isEnabled = !busy && !running && current
         stopButton.isEnabled = running
+        syncMenuActions()
     }
 }
 

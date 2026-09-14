@@ -21,6 +21,7 @@ BUILD_DIR="$SCRIPT_DIR/build"
 mkdir -p "$BUILD_DIR"
 
 swiftc -O \
+  -target arm64-apple-macosx14.2 \
   -o "$BUILD_DIR/codex-call-helper" \
   "$SCRIPT_DIR/Sources/main.swift" \
   -framework CoreAudio \
@@ -32,6 +33,12 @@ swiftc -O \
 APP="$BUILD_DIR/CodexCallHelper.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
+
+if [ -n "$CODESIGN_IDENTITY" ]; then
+  codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+    --entitlements "$SCRIPT_DIR/CodexCallHelper.entitlements" "$BUILD_DIR/codex-call-helper"
+fi
+
 cp "$BUILD_DIR/codex-call-helper" "$APP/Contents/MacOS/codex-call-helper"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -52,9 +59,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.1.4</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>4</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Codex Call routes your microphone audio into Codex for phone calls.</string>
 	<key>NSAudioCaptureUsageDescription</key>

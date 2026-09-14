@@ -17,11 +17,17 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.1.4</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>4</string>
+	<key>CodexCallExpectedTeamIdentifier</key>
+	<string>9CGENKKT99</string>
+	<key>CodexCallReleaseAPIURL</key>
+	<string>https://api.github.com/repos/thedarkcder/codex-call/releases/latest</string>
+	<key>CodexCallReleasesURL</key>
+	<string>https://github.com/thedarkcder/codex-call/releases/latest</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>13.0</string>
+	<string>14.2</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>

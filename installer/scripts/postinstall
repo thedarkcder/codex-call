@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+/usr/sbin/chown -R root:wheel \
+  "/Library/Audio/Plug-Ins/HAL/CodexVirtualRX.driver" \
+  "/Library/Audio/Plug-Ins/HAL/CodexVirtualTX.driver" \
+  "/Library/Audio/Plug-Ins/HAL/CodexVirtualClock.driver" \
+  "/usr/local/lib/codex-call"
+/bin/chmod 755 /usr/local/bin/codex-call-helper
+
+# Ask Core Audio to discover the newly installed or updated HAL plug-ins.
+/bin/launchctl kickstart -k system/com.apple.audio.coreaudiod >/dev/null 2>&1 || true
+
+# Installer runs as root, so hand the app launch to the active GUI user's
+# bootstrap session. The app then performs user-level setup and owns the router.
+CONSOLE_USER="$(/usr/bin/stat -f %Su /dev/console)"
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ] && [ "$CONSOLE_USER" != "loginwindow" ]; then
+  CONSOLE_UID="$(/usr/bin/id -u "$CONSOLE_USER")"
+  /bin/launchctl asuser "$CONSOLE_UID" \
+    /usr/bin/open -g "/Applications/Codex Call.app" >/dev/null 2>&1 || true
+fi
+
+exit 0

@@ -25,20 +25,18 @@ echo "== Building driver =="
 
 echo "== Building app =="
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/driver"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -O \
+  -target arm64-apple-macosx14.2 \
   -o "$APP/Contents/MacOS/CodexCall" \
   "$SCRIPT_DIR/Sources/main.swift" \
   -framework AppKit -framework AVFoundation -framework Foundation
 
 cp "$SCRIPT_DIR/Info.plist" "$APP/Contents/Info.plist"
-cp "$ROOT/native/helper/build/codex-call-helper" "$APP/Contents/Resources/codex-call-helper"
-chmod 755 "$APP/Contents/Resources/codex-call-helper"
-cp -R "$ROOT/native/driver/build/CodexVirtualRX.driver" "$APP/Contents/Resources/driver/"
-cp -R "$ROOT/native/driver/build/CodexVirtualTX.driver" "$APP/Contents/Resources/driver/"
-cp -R "$ROOT/native/driver/build/CodexVirtualClock.driver" "$APP/Contents/Resources/driver/"
+cp -R "$ROOT/native/helper/build/CodexCallHelper.app" "$APP/Contents/Resources/"
 cp -R "$ROOT/plugins/codex-call" "$APP/Contents/Resources/plugin"
+rm -rf "$APP/Contents/Resources/plugin/server/test"
 
 if [ -n "$CODESIGN_IDENTITY" ]; then
   echo "Signing identity: $CODESIGN_IDENTITY"

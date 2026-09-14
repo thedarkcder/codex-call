@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import readline from "node:readline";
 
 const PROTOCOL_VERSION = "2024-11-05";
-const SERVER_INFO = { name: "codex-call", version: "0.1.0" };
+const SERVER_INFO = { name: "codex-call", version: "0.1.4" };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(HERE, "..");
@@ -55,7 +55,11 @@ function runHelper(args) {
   }
   if (stdout.length === 0) return { ok: true, data: {} };
   try {
-    return { ok: true, data: JSON.parse(stdout) };
+    const data = JSON.parse(stdout);
+    if (data?.ok === false) {
+      return { ok: false, error: data.error || "codex-call helper reported a failure" };
+    }
+    return { ok: true, data };
   } catch {
     return { ok: true, data: { output: stdout } };
   }
@@ -144,9 +148,10 @@ function callTool(name, args) {
       if (!result.ok) return textResult(result.error, true);
       return textResult(
         [
-          `Call placed to ${args.number}. You are now LIVE on a telephone call.`,
+          `The Phone/FaceTime dialer opened for ${args.number}. Call state is STARTING_CALL`,
+          "until call audio becomes active, then it changes to IN_CALL.",
           "",
-          "IMPORTANT: The audio you are hearing is the REMOTE PERSON on the phone, not the",
+          "When call audio begins, what you hear is the REMOTE PERSON, not the",
           "owner of this session. Speak out loud to them and reply to what they say.",
           "",
           `Your objective for this call: ${args.goal}`,
@@ -162,13 +167,20 @@ function callTool(name, args) {
           "- When the objective is done: confirm the key details out loud, say goodbye,",
           "  then call end_phone_call and report the result to the owner.",
           "",
-          "Start speaking now.",
+          "Wait for call audio, then introduce yourself and begin.",
         ].join("\n"),
       );
     }
     case "end_phone_call": {
       const result = runHelper(["call", "end"]);
       if (!result.ok) return textResult(result.error, true);
+      if (result.data?.hungUp === false) {
+        return textResult(
+          "Audio routing was restored, but macOS did not confirm that Phone/FaceTime " +
+            "closed. Check the call UI and hang up there if the line is still active.",
+          true,
+        );
+      }
       return textResult("Call ended. Audio routing restored to normal mode.");
     }
     case "get_phone_call_state": {
