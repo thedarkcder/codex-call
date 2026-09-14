@@ -79,6 +79,22 @@ RX and TX are isolated, so Codex never hears itself.
 
 ## Install
 
+### Download (easiest)
+
+1. Download **`CodexCall-macos.zip`** from the
+   [latest release](https://github.com/thedarkcder/codex-call/releases/latest).
+2. Unzip and move **Codex Call.app** to `/Applications`.
+3. Double-click it.
+
+The app installs the virtual audio driver (admin password required), the helper,
+and the Codex plugin, then starts the router. On first run macOS may ask for
+Microphone and Audio Recording permissions.
+
+The app is signed with a Developer ID but not notarized, so Gatekeeper may warn;
+if so, right-click the app and choose **Open** once.
+
+### Build from source
+
 ```bash
 scripts/install.sh
 ```
@@ -89,10 +105,6 @@ or build and launch the app:
 app/install-app.sh
 open "/Applications/Codex Call.app"
 ```
-
-The app installs the audio driver (admin prompt), the helper, and the plugin,
-then starts the router. On first run macOS may ask for Microphone and Audio
-Recording permissions.
 
 ### One-time Codex setting
 
