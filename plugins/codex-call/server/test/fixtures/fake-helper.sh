@@ -17,7 +17,20 @@ case "${1:-}" in
     fi
     ;;
   status)
-    printf '%s\n' '{"ok":true,"state":"NORMAL","mode":"normal"}'
+    case "${FAKE_STATUS_STATE:-NORMAL}" in
+      IN_CALL)
+        printf '%s\n' '{"ok":true,"state":"IN_CALL","mode":"call"}'
+        ;;
+      STARTING_CALL)
+        printf '%s\n' '{"ok":true,"state":"STARTING_CALL","mode":"call"}'
+        ;;
+      ERROR)
+        printf '%s\n' '{"ok":true,"state":"ERROR","mode":"call"}'
+        ;;
+      *)
+        printf '%s\n' '{"ok":true,"state":"NORMAL","mode":"normal"}'
+        ;;
+    esac
     ;;
   *)
     printf '%s\n' '{"ok":true}'

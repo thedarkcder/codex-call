@@ -42,19 +42,57 @@ test("lists the five public call tools", async () => {
   );
 });
 
-test("reports STARTING_CALL until native audio becomes active", async () => {
-  const [response] = await request({
-    jsonrpc: "2.0",
-    id: 2,
-    method: "tools/call",
-    params: {
-      name: "start_phone_call",
-      arguments: { number: "+441234567890", goal: "Test the call" },
+test("waits for active call audio and hands the exact opening line back to Codex", async () => {
+  const [response] = await request(
+    {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "start_phone_call",
+        arguments: {
+          number: "+441234567890",
+          goal: "Test the call",
+          opening_line: "Hello, this is Codex, Aaron's AI assistant, testing the call.",
+        },
+      },
     },
-  });
+    { FAKE_STATUS_STATE: "IN_CALL" },
+  );
   assert.equal(response.result.isError, false);
-  assert.match(response.result.content[0].text, /STARTING_CALL/);
-  assert.doesNotMatch(response.result.content[0].text, /now LIVE/);
+  assert.match(response.result.content[0].text, /audio-active \(IN_CALL\)/);
+  assert.match(
+    response.result.content[0].text,
+    /Hello, this is Codex, Aaron's AI assistant, testing the call\./,
+  );
+  assert.match(response.result.content[0].text, /end this assistant turn immediately/i);
+  assert.match(response.result.content[0].text, /Do not call\s+get_phone_call_state/i);
+});
+
+test("returns a clear error instead of polling forever when call audio never activates", async () => {
+  const [response] = await request(
+    {
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: {
+        name: "start_phone_call",
+        arguments: {
+          number: "+441234567890",
+          goal: "Test the call",
+          opening_line: "Hello, this is Codex calling for Aaron.",
+        },
+      },
+    },
+    {
+      FAKE_STATUS_STATE: "STARTING_CALL",
+      CODEX_CALL_CONNECT_TIMEOUT_MS: "5",
+      CODEX_CALL_CONNECT_POLL_MS: "1",
+    },
+  );
+  assert.equal(response.result.isError, true);
+  assert.match(response.result.content[0].text, /did not become audio-active/i);
+  assert.match(response.result.content[0].text, /do not claim the call connected/i);
 });
 
 test("propagates a JSON helper failure even when its exit status is zero", async () => {
@@ -92,9 +130,31 @@ test("rejects an empty call goal before invoking the helper", async () => {
     method: "tools/call",
     params: {
       name: "start_phone_call",
-      arguments: { number: "+441234567890", goal: "" },
+      arguments: {
+        number: "+441234567890",
+        goal: "",
+        opening_line: "Hello, this is Codex calling for Aaron.",
+      },
     },
   });
   assert.equal(response.result.isError, true);
   assert.match(response.result.content[0].text, /non-empty goal/);
+});
+
+test("rejects an empty opening line before invoking the helper", async () => {
+  const [response] = await request({
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: {
+      name: "start_phone_call",
+      arguments: {
+        number: "+441234567890",
+        goal: "Test the call",
+        opening_line: "",
+      },
+    },
+  });
+  assert.equal(response.result.isError, true);
+  assert.match(response.result.content[0].text, /non-empty opening_line/);
 });

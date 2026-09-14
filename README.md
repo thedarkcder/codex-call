@@ -46,8 +46,9 @@ release and audio-device combination.
   `Codex Virtual Clock` (BlackHole-derived, signed, installed to
   `/Library/Audio/Plug-Ins/HAL`).
 - **Normal voice** — physical mic → RX → Codex; Codex → TX → speakers.
-- **Call placement** — `start_phone_call` switches to call mode and opens the
-  Phone/FaceTime dialer.
+- **Call placement** — `start_phone_call` switches to call mode, opens the
+  Phone/FaceTime dialer, and waits for real call audio before handing Codex its opening
+  line.
 - **Remote → Codex and local monitor** — the call app's audio is captured
   digitally into RX and mixed to the physical speakers.
 - **Codex → phone and local monitor** — TX is consumed by the call app as its
@@ -66,6 +67,9 @@ release and audio-device combination.
 - State remains `STARTING_CALL` until call audio actually becomes active.
   Hang-up detection follows the call processes' active input/output audio and
   returns to `NORMAL` after activity ends, even when the app stays open.
+- The call skill ends Codex's assistant turn immediately after its opening line and
+  leaves the call active. It does not poll state between voice turns, allowing the
+  remote participant's RX audio to trigger Codex's next normal voice turn.
 - `end_phone_call` now terminates the active Phone/FaceTime app before restoring
   routing, and reports when macOS does not confirm the hang-up.
 - The app compares helper contents rather than file size and safely restarts an
@@ -181,8 +185,10 @@ To place a call, ask Codex (voice or text):
 Call +44... and ask if they have anything Tuesday afternoon.
 ```
 
-Codex calls `start_phone_call`, which switches to call mode and dials. When done
-it calls `end_phone_call` and normal routing is restored.
+Codex calls `start_phone_call`, which switches to call mode, dials, and waits until call
+audio is active. Codex says its prepared opening line, yields to listen for the remote
+participant, and replies one voice turn at a time. When the goal is complete it calls
+`end_phone_call` and normal routing is restored.
 
 ## Components
 
