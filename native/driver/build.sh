@@ -31,6 +31,11 @@ fi
 git -C "$SRC_DIR" fetch --depth 1 origin "$BLACKHOLE_COMMIT" 2>/dev/null || true
 git -C "$SRC_DIR" checkout --quiet "$BLACKHOLE_COMMIT"
 
+GAIN_PATCH="$SCRIPT_DIR/patches/0001-configurable-input-gain.patch"
+if ! git -C "$SRC_DIR" apply --reverse --check "$GAIN_PATCH" 2>/dev/null; then
+  git -C "$SRC_DIR" apply "$GAIN_PATCH"
+fi
+
 SOURCE="$SRC_DIR/BlackHole/BlackHole.c"
 if [ ! -f "$SOURCE" ]; then
   echo "BlackHole source not found at $SOURCE" >&2
@@ -79,11 +84,11 @@ build_variant() {
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.8</string>
+	<string>0.1.9</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>8</string>
+	<string>9</string>
 	<key>CFPlugInFactories</key>
 	<dict>
 		<key>e395c745-4eea-4d94-bb92-46224221047c</key>
@@ -111,7 +116,7 @@ PLIST
 }
 
 build_variant rx "Codex Virtual RX" "com.codexcall.driver.rx"
-build_variant tx "Codex Virtual TX" "com.codexcall.driver.tx"
+build_variant tx "Codex Virtual TX" "com.codexcall.driver.tx" -DkCodexCallInputGain=2.0f
 build_variant clock "Codex Virtual Clock" "com.codexcall.driver.clock" \
   -DkDevice_HasInput=false -DkCanBeDefaultDevice=false -DkCanBeDefaultSystemDevice=false
 

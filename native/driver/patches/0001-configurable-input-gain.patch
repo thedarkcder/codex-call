@@ -1,0 +1,31 @@
+diff --git a/BlackHole/BlackHole.c b/BlackHole/BlackHole.c
+index 3bf69ad..615a7b9 100644
+--- a/BlackHole/BlackHole.c
++++ b/BlackHole/BlackHole.c
+@@ -244,6 +244,10 @@
+ #define                             kEnableVolumeControl                 true
+ #endif
+ 
++#ifndef kCodexCallInputGain
++#define                             kCodexCallInputGain                  1.0f
++#endif
++
+ #ifndef kCanBeDefaultDevice
+ #define                             kCanBeDefaultDevice                 true
+ #endif
+@@ -4578,6 +4582,15 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
+ 	 	vDSP_vsmul(ioMainBuffer, 1, &gVolume_Master_Value, ioMainBuffer, 1, inIOBufferFrameSize * kNumber_Of_Channels);
+ 	    }
+ 
++            if(kCodexCallInputGain != 1.0f)
++            {
++                Float32 theMinimum = -1.0f;
++                Float32 theMaximum = 1.0f;
++                Float32 theGain = kCodexCallInputGain;
++                vDSP_vsmul(ioMainBuffer, 1, &theGain, ioMainBuffer, 1, inIOBufferFrameSize * kNumber_Of_Channels);
++                vDSP_vclip(ioMainBuffer, 1, &theMinimum, &theMaximum, ioMainBuffer, 1, inIOBufferFrameSize * kNumber_Of_Channels);
++            }
++
+         }
+     }
+     

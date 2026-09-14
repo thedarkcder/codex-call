@@ -235,14 +235,16 @@ final class RingBuffer {
     private var storage: UnsafeMutablePointer<Float>
     private let channels: Int
     private let capacity: Int
+    private let gain: Float
     private var writeFrame = 0
     private var readFrame = 0
     private var available = 0
     private let lock = NSLock()
 
-    init(channels: Int, capacityFrames: Int) {
+    init(channels: Int, capacityFrames: Int, gain: Float = 1) {
         self.channels = max(1, channels)
         self.capacity = max(1, capacityFrames)
+        self.gain = gain
         storage = UnsafeMutablePointer<Float>.allocate(capacity: self.capacity * self.channels)
         storage.initialize(repeating: 0, count: self.capacity * self.channels)
     }
@@ -284,14 +286,20 @@ final class RingBuffer {
             }
             let base = readFrame * channels
             if dstChannels == channels {
-                for channel in 0..<dstChannels { dst[frame * dstChannels + channel] = storage[base + channel] }
+                for channel in 0..<dstChannels {
+                    dst[frame * dstChannels + channel] = max(
+                        -1, min(1, storage[base + channel] * gain)
+                    )
+                }
             } else if dstChannels == 1 {
                 var sum: Float = 0
                 for channel in 0..<channels { sum += storage[base + channel] }
-                dst[frame] = sum / Float(channels)
+                dst[frame] = max(-1, min(1, (sum / Float(channels)) * gain))
             } else {
                 for channel in 0..<dstChannels {
-                    dst[frame * dstChannels + channel] = storage[base + min(channel, channels - 1)]
+                    dst[frame * dstChannels + channel] = max(
+                        -1, min(1, storage[base + min(channel, channels - 1)] * gain)
+                    )
                 }
             }
             readFrame = (readFrame + 1) % capacity
@@ -461,6 +469,13 @@ final class Router {
     struct Link {
         let source: AudioDeviceID
         let destination: AudioDeviceID
+        let gain: Float
+
+        init(source: AudioDeviceID, destination: AudioDeviceID, gain: Float = 1) {
+            self.source = source
+            self.destination = destination
+            self.gain = gain
+        }
     }
 
     private var procs: [(AudioDeviceID, AudioDeviceIOProcID)] = []
@@ -475,7 +490,9 @@ final class Router {
             var sourceRings: [AudioDeviceID: [RingBuffer]] = [:]
             var destinationRings: [AudioDeviceID: [RingBuffer]] = [:]
             for link in links {
-                let ring = RingBuffer(channels: 8, capacityFrames: 96_000)
+                let ring = RingBuffer(
+                    channels: 8, capacityFrames: 96_000, gain: link.gain
+                )
                 rings.append(ring)
                 sourceRings[link.source, default: []].append(ring)
                 destinationRings[link.destination, default: []].append(ring)
@@ -874,7 +891,9 @@ func commandRun(argv: [String], json: Bool) {
                 // audio stalls until the call releases the device.
             } else {
                 links.append(Router.Link(source: input, destination: rx))
-                links.append(Router.Link(source: tx, destination: physicalOutput))
+                // TX applies +6 dB for telephone intelligibility. Compensate the
+                // normal local monitor so everyday Codex volume stays unchanged.
+                links.append(Router.Link(source: tx, destination: physicalOutput, gain: 0.5))
             }
             try router.start(links: links)
         } catch {
@@ -1704,7 +1723,7 @@ func commandTapCall(argv: [String], json: Bool) {
 
     let remoteRXRing = RingBuffer(channels: 8, capacityFrames: 96_000)
     let remoteMonitorRing = RingBuffer(channels: 8, capacityFrames: 96_000)
-    let codexMonitorRing = RingBuffer(channels: 8, capacityFrames: 96_000)
+    let codexMonitorRing = RingBuffer(channels: 8, capacityFrames: 96_000, gain: 2)
     let remoteCaptureScratch = Scratch()
     let codexCaptureScratch = Scratch()
     let remoteRenderScratch = Scratch()
@@ -2070,6 +2089,7 @@ case "help", "--help", "-h":
       route normal|call  switch routing mode
       doctor             run diagnostics
       selftest           capture a short sample from the physical microphone
+      loopback           measure a virtual device without placing a call
       call start|end     call lifecycle (milestones 2/3)
     """)
 default:

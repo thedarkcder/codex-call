@@ -113,6 +113,10 @@ Codex ─▶ TX ─▶ phone microphone ─▶ remote caller
 
 RX and TX are isolated, so Codex never hears itself.
 
+The TX driver applies a clipped 6 dB gain so Codex remains intelligible over
+telephone audio. Normal mode compensates that gain before local playback; call
+mode applies the same gain to the independent local Codex monitor.
+
 ## Requirements
 
 - macOS 14.2+ (Core Audio process taps)
@@ -156,7 +160,7 @@ prompt at launch and never performs an unattended privileged installation.
 
 ```bash
 installer/build-pkg.sh
-open dist/CodexCall-0.1.8.pkg
+open dist/CodexCall-0.1.9.pkg
 ```
 
 `scripts/install.sh` and `app/install-app.sh` are retained as developer

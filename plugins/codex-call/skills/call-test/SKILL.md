@@ -54,7 +54,16 @@ Run the diagnostics and audio self-test.
    codex-call-helper selftest
    ```
 
-4. If the user is running the desktop app, confirm the realtime voice is still audible
+4. Test the outgoing virtual microphone without placing a call:
+
+   ```bash
+   codex-call-helper loopback --device "Codex Virtual TX" --seconds 2
+   ```
+
+   A healthy boosted TX reports approximately `rms=0.35355` and `peak=0.50000`.
+   Treat values near `rms=0.17678` and `peak=0.25000` as the unboosted driver.
+
+5. If the user is running the desktop app, confirm the realtime voice is still audible
    and that speaking to Codex works normally. If audio is broken, run:
 
    ```bash
@@ -67,5 +76,7 @@ Run the diagnostics and audio self-test.
 
 - Never report success unless `doctor` returns all checks OK.
 - The router must be running for audio to pass through `Codex Virtual RX`/`TX`.
+- The TX loopback tests the exact virtual microphone signal a call app reads without
+  contacting another person. It does not test a carrier or remote handset.
 - `doctor` must also find `Codex Virtual Clock`; call mode no longer falls back to
   clocking its tap from the physical speaker device.
