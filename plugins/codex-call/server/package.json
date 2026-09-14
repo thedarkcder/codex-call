@@ -1,0 +1,9 @@
+{
+  "name": "codex-call-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "codex-call-mcp": "./index.mjs"
+  }
+}

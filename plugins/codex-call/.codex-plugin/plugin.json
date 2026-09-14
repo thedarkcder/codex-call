@@ -1,0 +1,33 @@
+{
+  "name": "codex-call",
+  "version": "0.1.2",
+  "description": "Place and conduct phone calls through Codex realtime voice using virtual Core Audio routing.",
+  "author": {
+    "name": "Local developer"
+  },
+  "keywords": [
+    "phone",
+    "call",
+    "realtime",
+    "voice",
+    "coreaudio",
+    "facetime"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex Call",
+    "shortDescription": "Make phone calls with Codex voice.",
+    "longDescription": "Codex Call lets Codex place Apple phone or FaceTime calls, speak on your behalf using Codex realtime voice, and return to normal conversation when the call ends. Audio is routed digitally through Codex Virtual RX and Codex Virtual TX.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Call my dentist and ask about Tuesday afternoon."
+    ],
+    "brandColor": "#3B82F6"
+  }
+}

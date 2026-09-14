@@ -1,0 +1,8 @@
+native/driver/.cache/
+native/driver/build/
+native/helper/build/
+app/build/
+native/**/DerivedData/
+*.o
+*.dSYM/
+.DS_Store

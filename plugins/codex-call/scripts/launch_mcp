@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -lt 1 ]; then
+  printf '%s\n' 'codex-call MCP server could not start: missing server path.' >&2
+  exit 64
+fi
+
+PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH
+
+for candidate in \
+  "${CODEX_MCP_NODE_PATH:-}" \
+  "${CODEX_BROWSER_USE_NODE_PATH:-}" \
+  "/opt/homebrew/bin/node" \
+  "/usr/local/bin/node" \
+  "/usr/bin/node"
+do
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    exec "$candidate" "$@"
+  fi
+done
+
+if node_path=$(command -v node 2>/dev/null); then
+  case "$node_path" in
+    /*) exec "$node_path" "$@" ;;
+  esac
+fi
+
+printf '%s\n' 'codex-call could not find a Node runtime.' >&2
+exit 127

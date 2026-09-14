@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "codex_call": {
+      "command": "./scripts/launch_mcp",
+      "args": [
+        "./server/index.mjs"
+      ],
+      "cwd": ".",
+      "env_vars": [
+        "HOME",
+        "PATH",
+        "CODEX_CALL_HELPER"
+      ],
+      "startup_timeout_sec": 15,
+      "tool_timeout_sec": 600
+    }
+  }
+}
