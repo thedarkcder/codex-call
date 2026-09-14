@@ -32,59 +32,72 @@ This is an **experimental prototype**. Use it at your own risk.
 - **Not affiliated** with OpenAI or Apple. "Codex", "ChatGPT", "FaceTime", and
   "Apple" are trademarks of their respective owners.
 
-## Status
+## Project status
 
-This is a working prototype. The routing and lifecycle reliability fixes below
-are implemented; a real-call soak test is still required on each supported macOS
-release and audio-device combination.
+Codex Call is an experimental prototype under active development. Incoming call
+audio and Codex voice turns work, but the outgoing digital phone path is not yet
+proven end to end. Do not rely on it for unattended or important calls.
 
-### Working
+### Build stages
 
-- **Plugin** installed into Codex as `codex-call@personal` with MCP tools and a
-  `phone-call` skill.
-- **Virtual audio devices** `Codex Virtual RX`, `Codex Virtual TX`, and
-  `Codex Virtual Clock` (BlackHole-derived, signed, installed to
-  `/Library/Audio/Plug-Ins/HAL`).
-- **Normal voice** — physical mic → RX → Codex; Codex → TX → speakers.
-- **Call placement** — `start_phone_call` switches to call mode, opens the
-  Phone/FaceTime dialer, and waits for real call audio before handing Codex its opening
-  line.
-- **Remote → Codex and local monitor** — the call app's audio is captured
-  digitally into RX and mixed to the physical speakers.
-- **Codex → phone and local monitor** — Codex writes directly to TX for the call
-  app's microphone; an unmuted process tap independently mirrors Codex to the
+- [x] Codex plugin with five MCP tools and the `phone-call` skill
+- [x] Signed virtual RX, TX, and clock Core Audio devices
+- [x] Menu-bar/window control app with consistent routing state
+- [x] Standard signed macOS package installer and in-app updater path
+- [x] Normal Codex voice: physical microphone → RX → Codex → TX → speakers
+- [x] Phone/FaceTime call placement and transition into call mode
+- [x] Remote caller audio captured into RX and transcribed by Codex
+- [x] Codex generates spoken replies during a live call
+- [x] Codex replies are audible through the local monitor
+- [ ] Make TX the single authoritative Codex-output stream for both Phone and
+      local monitoring
+- [ ] Prove that Phone/FaceTime opens `Codex Virtual TX` as its microphone
+- [ ] Verify channel mapping, clocking, and remote volume with recorded evidence
+- [ ] Pass repeated end-to-end calls with clearly intelligible remote audio
+- [ ] Complete hang-up, reconnect, and long-call soak testing
+- [ ] Publish a production-ready release
+
+### Tests completed
+
+- `doctor`, `audio-status`, `devices`, and physical-microphone `selftest` pass on
+  the development Mac.
+- A generated speech sample sent through TX in normal mode was audible on the
   physical speakers.
-- **Menu-bar + window app** that configures the user-level Codex plugin, owns
-  the audio router, and provides a signed-package update check.
+- A digital TX loopback returned the same `0.25` peak written into the installed
+  unity-gain driver, confirming that the virtual device itself did not attenuate
+  that test signal.
+- A call to the UK speaking-clock service confirmed remote audio reached Codex;
+  Codex transcribed it, generated replies, and those replies were heard locally.
+- A live person reported possibly hearing Codex very faintly. Because the local
+  monitor currently uses a separate process tap, that result is inconclusive and
+  may have been acoustic speaker leakage rather than the digital TX path.
 
-### Reliability fixes
+### Known gaps
 
-- The router fans remote audio out to RX and the local monitor, and mixes the
-  remote and unmuted Codex monitor taps into one physical-output IOProc. The
-  phone path stays direct, so a failed local monitor cannot silence the caller.
-- Core Audio IO is stopped before an aggregate device or process tap is
-  destroyed; failed graph builds clean up all partially-started IOProcs.
-- A changed Phone/FaceTime audio-process set causes a complete tap + aggregate
-  rebuild instead of leaving the router attached to a stale process object.
-- State remains `STARTING_CALL` until call audio actually becomes active.
-  Hang-up detection follows the call processes' active input/output audio and
-  returns to `NORMAL` after activity ends, even when the app stays open.
-- The call skill ends Codex's assistant turn immediately after its opening line and
-  leaves the call active. It does not poll state between voice turns, allowing the
-  remote participant's RX audio to trigger Codex's next normal voice turn.
-- `end_phone_call` now terminates the active Phone/FaceTime app before restoring
-  routing, and reports when macOS does not confirm the hang-up.
-- The app compares helper contents rather than file size and safely restarts an
-  older running helper after an update.
-- Restore now resets the default system-output device as well as input/output.
+- Local monitoring is not currently taken from the exact TX stream consumed by
+  Phone, so hearing Codex locally does not prove that the caller received it.
+- The Phone/FaceTime input-device attachment has not been instrumented and
+  proven during an active call.
+- The uninstalled 0.1.9 gain experiment is not considered a confirmed fix;
+  signal gain should not mask an unverified routing or channel-selection fault.
+- Hang-up detection and audio graph recovery still need repeated real-call
+  testing across different macOS and hardware configurations.
+- MCP cannot directly control the desktop app's private realtime voice session.
+  This limits explicit turn steering, but it does not prevent a correct Core
+  Audio input/output implementation.
 
-### Remaining platform limitation
+## Contributing
 
-The plugin still cannot directly append instructions to, or force a turn in,
-the desktop app's already-running realtime session. MCP and the renderer-owned
-realtime transport are separate. The strengthened routing and audio-activity
-state remove several causes of apparent silence, but a true realtime-session
-steering API would require a Codex desktop integration point.
+Contributions and reproducible test results are welcome. The most useful help
+right now is Core Audio expertise, Phone/FaceTime device-selection diagnostics,
+testing on other Apple Silicon Macs, and independently verified call recordings
+that identify exactly where the outgoing signal changes.
+
+Please open a GitHub issue before starting a large change. Include your macOS
+version, audio hardware, the relevant diagnostic output, exact reproduction
+steps, and whether the result was measured at TX, heard locally, or confirmed by
+the remote caller. Pull requests should keep the standard package installer as
+the only privileged installation and upgrade path.
 
 ## Architecture
 
