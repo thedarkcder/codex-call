@@ -10,6 +10,28 @@ Codex: "Calling."
 Codex: "They had 2:30 and 4:15. I booked 4:15."
 ```
 
+## Disclaimer
+
+This is an **experimental prototype**. Use it at your own risk.
+
+- **It places real phone calls.** Calls may incur charges from your carrier or
+  the number called. You are responsible for any charges.
+- **It routes and processes audio.** Your microphone and the call audio are
+  routed through virtual audio devices and Codex. Do not use it for sensitive
+  conversations you would not want processed by an AI service.
+- **Recording/consent laws apply.** Recording or transcribing calls is illegal
+  in some jurisdictions without consent, and many places require that the other
+  party be told they are speaking to an AI. **You** are responsible for
+  complying with all applicable laws and for disclosing that an AI is on the
+  call.
+- **AI can be wrong.** Codex may mishear, misunderstand, or say something
+  incorrect, and must not be relied on for legal, medical, financial, or other
+  consequential decisions or commitments.
+- **No warranty.** Provided "as is", without warranty of any kind, express or
+  implied. The authors are not liable for any damages arising from its use.
+- **Not affiliated** with OpenAI or Apple. "Codex", "ChatGPT", "FaceTime", and
+  "Apple" are trademarks of their respective owners.
+
 ## Status
 
 This is a working prototype. Audio routing and call placement work; two things
