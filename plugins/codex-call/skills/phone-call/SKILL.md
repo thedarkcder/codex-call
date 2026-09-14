@@ -19,24 +19,18 @@ with broken audio routing.
 
 1. Resolve the number. If the user gave a contact name, look up the number first. Confirm
    the number with the user when there is any ambiguity.
-2. Prepare a brief `opening_line` that identifies you as the owner's AI assistant and
-   states the purpose of the call. Do not claim to be the owner.
-3. Call `start_phone_call` with the validated number, a clear self-contained `goal`, and
-   the prepared `opening_line`. The tool waits for real call audio and returns only when
-   the call reaches `IN_CALL` or connection fails.
-4. On success, your entire spoken response after the tool must be the `opening_line`.
-   Do not narrate progress, poll state, or call another tool in that assistant turn.
-   End the turn immediately after the opening line so Codex resumes listening while the
-   phone call remains active.
-5. On a connection error, do not claim the call connected. Tell the owner what the tool
+2. Call `start_phone_call` with the validated number and a clear, self-contained `goal`.
+   The tool waits for real call audio and returns only when the call reaches `IN_CALL`
+   or connection fails.
+3. Once connected, the incoming voice is the remote participant. Answer them out loud,
+   naturally, one turn at a time, and keep listening.
+4. On a connection error, do not claim the call connected. Tell the owner what the tool
    reported and ask them to inspect the Phone/FaceTime UI.
 
 ## During the call
 
-After the opening-line turn, leave the call active. Each new incoming voice turn is the
-remote telephone participant. Answer it directly, then end the assistant turn so Codex
-listens for the participant again. Do not call `get_phone_call_state` before or after each
-reply; polling keeps Codex busy and prevents the normal voice listen/respond cycle.
+Leave the call active. Each incoming voice turn is the remote telephone participant;
+answer it directly and naturally, then keep listening. Do not poll `get_phone_call_state`.
 
 While the call is active, the following apply:
 

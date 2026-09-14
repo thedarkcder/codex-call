@@ -10,6 +10,7 @@ let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
 let configURL = appSupportDir.appendingPathComponent("config.json")
 let stateURL = appSupportDir.appendingPathComponent("state.json")
 let pidURL = appSupportDir.appendingPathComponent("helper.pid")
+let callTapReadyURL = appSupportDir.appendingPathComponent("call-tap-ready.pid")
 
 let virtualRXName = "Codex Virtual RX"
 let virtualTXName = "Codex Virtual TX"
@@ -846,34 +847,31 @@ func commandRun(argv: [String], json: Bool) {
 
     let router = Router()
     var mode = ""
-    var tapID = AudioObjectID(0)
-    var aggregateID = AudioObjectID(0)
     var physicalOutput = output
-    let clockUID = clockDeviceUID(fallback: deviceUID(physicalOutput))
-    var tappedProcessIDs = Set<AudioObjectID>()
+    var callTapChild: Process?
 
     func teardownTap(stopRouting: Bool = true) {
+        stopCallTap()
         if stopRouting { router.stop() }
-        // The aggregate owns the tap stream. Destroy it before the tap, and never
-        // while an IOProc is still reading from it.
-        if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID); aggregateID = 0 }
-        if tapID != 0 { AudioHardwareDestroyProcessTap(tapID); tapID = 0 }
-        tappedProcessIDs.removeAll()
     }
 
     func rebuild() {
+        // Creating/destroying the private tap aggregate can invalidate already
+        // running physical-output IOProcs. Start the speaker mixer only after the
+        // child has finished creating and starting that aggregate.
+        if mode == "call", !callTapReady() {
+            router.stop()
+            return
+        }
         do {
             var links: [Router.Link] = []
             if mode == "call" {
-                if aggregateID != 0 {
-                    links.append(Router.Link(source: aggregateID, destination: rx))
-                    // A muted process tap removes the call app from the system mix.
-                    // Mirror it locally so the owner can hear the remote participant.
-                    links.append(Router.Link(source: aggregateID, destination: physicalOutput))
-                }
-                // TX is consumed by the phone as its microphone and mirrored locally
-                // so the owner can also hear Codex. Router mixes both speaker links
-                // into one physical-output IOProc.
+                // The tap child writes the muted remote caller into RX. Capture RX
+                // and TX here and mix both into ONE physical-output IOProc. Giving
+                // the child a second speaker IOProc made the two render paths race,
+                // while sharing one ring between RX and the speaker let either
+                // consumer starve the other.
+                links.append(Router.Link(source: rx, destination: physicalOutput))
                 links.append(Router.Link(source: tx, destination: physicalOutput))
             } else {
                 links.append(Router.Link(source: input, destination: rx))
@@ -893,7 +891,7 @@ func commandRun(argv: [String], json: Bool) {
             setDefaultDevice(kAudioHardwarePropertyDefaultInputDevice, tx)
             setDefaultDevice(kAudioHardwarePropertyDefaultOutputDevice, tx)
             setDefaultDevice(kAudioHardwarePropertyDefaultSystemOutputDevice, tx)
-            attachTapIfPossible()
+            spawnCallTap()
         } else {
             setDefaultDevice(kAudioHardwarePropertyDefaultInputDevice, rx)
             setDefaultDevice(kAudioHardwarePropertyDefaultOutputDevice, tx)
@@ -902,32 +900,50 @@ func commandRun(argv: [String], json: Bool) {
         rebuild()
     }
 
-    func attachTapIfPossible() {
-        guard mode == "call", aggregateID == 0 else { return }
-        let processes = callAppProcessObjects()
-        guard !processes.isEmpty else {
-            print("tap: no call app process yet")
+    func spawnCallTap() {
+        guard mode == "call", callTapChild == nil else { return }
+        try? FileManager.default.removeItem(at: callTapReadyURL)
+        let helper = CommandLine.arguments[0]
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: helper)
+        process.arguments = ["tap-call", "--to", virtualRXName, "--json"]
+        // Hidden aggregate/tap failures previously looked like connected calls with
+        // silent audio, so keep child diagnostics in the app log.
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
+        do {
+            try process.run()
+            callTapChild = process
+            print("tap: spawned separate call tap -> \(virtualRXName)")
             fflush(stdout)
-            return
-        }
-        let bundle = processes.map { processBundleID($0) }.joined(separator: ",")
-        guard let tap = createProcessTap(processObjects: processes, mute: true) else {
-            print("tap: create failed for \(bundle)")
+        } catch {
+            print("tap: failed to spawn (\(error))")
             fflush(stdout)
-            return
         }
-        let uid = tapUID(tap)
-        guard !uid.isEmpty, let aggregate = createTapAggregate(tapUIDString: uid, clockDeviceUID: clockUID) else {
-            AudioHardwareDestroyProcessTap(tap)
-            print("tap: aggregate failed for \(bundle)")
-            fflush(stdout)
-            return
+    }
+
+    func stopCallTap() {
+        if let child = callTapChild, child.isRunning {
+            child.terminate()
+            for _ in 0..<20 where child.isRunning {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if child.isRunning {
+                kill(child.processIdentifier, SIGKILL)
+            }
+            child.waitUntilExit()
         }
-        tapID = tap
-        aggregateID = aggregate
-        tappedProcessIDs = Set(processes)
-        print("tap: attached to \(bundle)")
-        fflush(stdout)
+        callTapChild = nil
+        try? FileManager.default.removeItem(at: callTapReadyURL)
+    }
+
+    func callTapReady() -> Bool {
+        guard let child = callTapChild, child.isRunning,
+              let text = try? String(contentsOf: callTapReadyURL, encoding: .utf8),
+              Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) == child.processIdentifier else {
+            return false
+        }
+        return true
     }
 
     switchMode(loadState().mode == "call" ? "call" : "normal")
@@ -1012,26 +1028,32 @@ func commandRun(argv: [String], json: Bool) {
             callUIWasSeen = false
             callAudioWasActive = false
             callAudioIdleSince = nil
-        } else if mode == "call" && aggregateID == 0 {
-            let before = aggregateID
-            attachTapIfPossible()
-            if aggregateID != before { rebuild() }
+        } else if mode == "call" {
+            if let child = callTapChild, !child.isRunning {
+                let status = child.terminationStatus
+                callTapChild = nil
+                try? FileManager.default.removeItem(at: callTapReadyURL)
+                print("tap: child exited with status \(status); restarting")
+                fflush(stdout)
+            }
+            if callTapChild == nil {
+                router.stop()
+                spawnCallTap()
+            }
         }
         if mode == "call" {
-            let currentProcessIDs = Set(callAppProcessObjects())
-            if aggregateID != 0, !currentProcessIDs.isEmpty, currentProcessIDs != tappedProcessIDs {
-                print("tap: call audio process changed; rebuilding")
-                fflush(stdout)
-                teardownTap()
-                attachTapIfPossible()
+            if callTapReady(), !router.running {
                 rebuild()
+                print("call monitor ready: RX + TX -> \(deviceName(physicalOutput))")
+                fflush(stdout)
             }
-
             if callUIAppRunning() {
                 callUIWasSeen = true
             }
 
-            let audioActive = callAudioActive()
+            // Wait for the child to render remote audio into RX before announcing
+            // IN_CALL. This also lets the aggregate settle before Codex first speaks.
+            let audioActive = callAudioActive() && callTapReady()
             if audioActive {
                 if !callAudioWasActive {
                     var state = loadState()
@@ -1588,6 +1610,118 @@ func commandTap(argv: [String], json: Bool) {
     }
 }
 
+
+func commandTapCall(argv: [String], json: Bool) {
+    let toName = option("--to", argv) ?? virtualRXName
+    guard let toDevice = findDevice(named: toName) else {
+        if json { print(jsonString(["ok": false, "error": "target device not found"])) }
+        else { print("tap-call: target device not found") }
+        exit(2)
+    }
+    let mute = !argv.contains("--unmuted")
+
+    var processes: [AudioObjectID] = []
+    // Background telephony services can exist with no live call. Wait for the
+    // Phone/FaceTime process so the tap cannot bind to an idle service set.
+    for _ in 0..<300 {
+        if callUIAppRunning() {
+            processes = callAppProcessObjects()
+            if !processes.isEmpty { break }
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    guard !processes.isEmpty else {
+        if json { print(jsonString(["ok": false, "error": "no active call app process"])) }
+        else { print("tap-call: no active call app process") }
+        exit(3)
+    }
+    guard let tap = createProcessTap(processObjects: processes, mute: mute) else {
+        if json { print(jsonString(["ok": false, "error": "tap create failed"])) }
+        else { print("tap-call: process tap creation failed") }
+        exit(3)
+    }
+    let clockUID = clockDeviceUID(fallback: deviceUID(defaultOutput()))
+    let uid = tapUID(tap)
+    guard !uid.isEmpty,
+          let aggregate = createTapAggregate(tapUIDString: uid, clockDeviceUID: clockUID) else {
+        AudioHardwareDestroyProcessTap(tap)
+        if json { print(jsonString(["ok": false, "error": "aggregate failed"])) }
+        else { print("tap-call: aggregate device creation failed") }
+        exit(3)
+    }
+
+    let ring = RingBuffer(channels: 8, capacityFrames: 96_000)
+    let captureScratch = Scratch()
+    let renderScratch = Scratch()
+
+    var captureProc: AudioDeviceIOProcID?
+    let captureStatus = AudioDeviceCreateIOProcIDWithBlock(&captureProc, aggregate, nil) {
+        _, inputData, _, _, _ in
+        inputToRing(inputData, ring: ring, scratch: captureScratch)
+    }
+    var renderProc: AudioDeviceIOProcID?
+    let renderStatus = AudioDeviceCreateIOProcIDWithBlock(&renderProc, toDevice, nil) {
+        _, _, _, outputData, _ in
+        ringToOutput(outputData, ring: ring, scratch: renderScratch)
+    }
+    guard captureStatus == noErr, renderStatus == noErr, let cap = captureProc, let ren = renderProc else {
+        if let proc = captureProc { AudioDeviceDestroyIOProcID(aggregate, proc) }
+        if let proc = renderProc { AudioDeviceDestroyIOProcID(toDevice, proc) }
+        AudioHardwareDestroyAggregateDevice(aggregate)
+        AudioHardwareDestroyProcessTap(tap)
+        if json { print(jsonString(["ok": false, "error": "i/o setup failed"])) }
+        else { print("tap-call: audio I/O setup failed") }
+        exit(3)
+    }
+    let renderStart = AudioDeviceStart(toDevice, ren)
+    let captureStart = AudioDeviceStart(aggregate, cap)
+    guard renderStart == noErr, captureStart == noErr else {
+        if captureStart == noErr { AudioDeviceStop(aggregate, cap) }
+        if renderStart == noErr { AudioDeviceStop(toDevice, ren) }
+        AudioDeviceDestroyIOProcID(toDevice, ren)
+        AudioDeviceDestroyIOProcID(aggregate, cap)
+        AudioHardwareDestroyAggregateDevice(aggregate)
+        AudioHardwareDestroyProcessTap(tap)
+        if json { print(jsonString(["ok": false, "error": "i/o start failed"])) }
+        else { print("tap-call: audio I/O start failed") }
+        exit(3)
+    }
+
+    try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+    try? "\(getpid())\n".write(to: callTapReadyURL, atomically: true, encoding: .utf8)
+    if json {
+        print(jsonString([
+            "ok": true,
+            "to": toName,
+            "processes": processes.map { processBundleID($0) },
+        ]))
+    } else {
+        print("tap-call: routing remote audio to \(toName)")
+    }
+    fflush(stdout)
+
+    let semaphore = DispatchSemaphore(value: 0)
+    let queue = DispatchQueue(label: "codexcall.tapcall")
+    var sources: [DispatchSourceSignal] = []
+    for sig in [SIGINT, SIGTERM] {
+        signal(sig, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: sig, queue: queue)
+        source.setEventHandler { semaphore.signal() }
+        source.resume()
+        sources.append(source)
+    }
+    _ = sources
+    semaphore.wait()
+
+    try? FileManager.default.removeItem(at: callTapReadyURL)
+    AudioDeviceStop(toDevice, ren)
+    AudioDeviceStop(aggregate, cap)
+    AudioDeviceDestroyIOProcID(toDevice, ren)
+    AudioDeviceDestroyIOProcID(aggregate, cap)
+    AudioHardwareDestroyAggregateDevice(aggregate)
+    AudioHardwareDestroyProcessTap(tap)
+}
+
 func commandRequestMic(json: Bool) {
     func report(_ status: String) {
         try? status.write(toFile: "/tmp/codexcall-mic-status.txt", atomically: true, encoding: .utf8)
@@ -1790,6 +1924,7 @@ case "ringtest": commandRingtest(json: json)
 case "graphtest": commandGraphtest(json: json)
 case "request-mic": commandRequestMic(json: json)
 case "tap": commandTap(argv: argv, json: json)
+case "tap-call": commandTapCall(argv: argv, json: json)
 case "processes": commandProcesses(json: json)
 case "call": commandCall(argv: argv, json: json)
 case "help", "--help", "-h":

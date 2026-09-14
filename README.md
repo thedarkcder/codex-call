@@ -154,7 +154,7 @@ prompt at launch and never performs an unattended privileged installation.
 
 ```bash
 installer/build-pkg.sh
-open dist/CodexCall-0.1.4.pkg
+open dist/CodexCall-0.1.5.pkg
 ```
 
 `scripts/install.sh` and `app/install-app.sh` are retained as developer

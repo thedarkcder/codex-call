@@ -42,7 +42,7 @@ test("lists the five public call tools", async () => {
   );
 });
 
-test("waits for active call audio and hands the exact opening line back to Codex", async () => {
+test("waits for active call audio and tells Codex it is live on the call", async () => {
   const [response] = await request(
     {
       jsonrpc: "2.0",
@@ -60,13 +60,12 @@ test("waits for active call audio and hands the exact opening line back to Codex
     { FAKE_STATUS_STATE: "IN_CALL" },
   );
   assert.equal(response.result.isError, false);
-  assert.match(response.result.content[0].text, /audio-active \(IN_CALL\)/);
+  assert.match(response.result.content[0].text, /live on the telephone/i);
+  assert.match(response.result.content[0].text, /REMOTE PERSON/i);
   assert.match(
     response.result.content[0].text,
-    /Hello, this is Codex, Aaron's AI assistant, testing the call\./,
+    /You may open with: Hello, this is Codex, Aaron's AI assistant, testing the call\./,
   );
-  assert.match(response.result.content[0].text, /end this assistant turn immediately/i);
-  assert.match(response.result.content[0].text, /Do not call\s+get_phone_call_state/i);
 });
 
 test("returns a clear error instead of polling forever when call audio never activates", async () => {
@@ -141,20 +140,22 @@ test("rejects an empty call goal before invoking the helper", async () => {
   assert.match(response.result.content[0].text, /non-empty goal/);
 });
 
-test("rejects an empty opening line before invoking the helper", async () => {
-  const [response] = await request({
-    jsonrpc: "2.0",
-    id: 7,
-    method: "tools/call",
-    params: {
-      name: "start_phone_call",
-      arguments: {
-        number: "+441234567890",
-        goal: "Test the call",
-        opening_line: "",
+test("allows omitting the opening line", async () => {
+  const [response] = await request(
+    {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: {
+        name: "start_phone_call",
+        arguments: {
+          number: "+441234567890",
+          goal: "Test the call",
+        },
       },
     },
-  });
-  assert.equal(response.result.isError, true);
-  assert.match(response.result.content[0].text, /non-empty opening_line/);
+    { FAKE_STATUS_STATE: "IN_CALL" },
+  );
+  assert.equal(response.result.isError, false);
+  assert.match(response.result.content[0].text, /live on the telephone/i);
 });

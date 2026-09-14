@@ -59,9 +59,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.4</string>
+	<string>0.1.5</string>
 	<key>CFBundleVersion</key>
-	<string>4</string>
+	<string>5</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Codex Call routes your microphone audio into Codex for phone calls.</string>
 	<key>NSAudioCaptureUsageDescription</key>
