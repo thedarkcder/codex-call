@@ -41,6 +41,7 @@ build_variant() {
   local variant="$1"
   local name="$2"
   local bundle_id="$3"
+  shift 3
   local bundle="$BUILD_DIR/${name// /}.driver"
   local executable="${name// /}"
 
@@ -55,6 +56,7 @@ build_variant() {
     -DkDevice2_Name="\"$name Mirror\"" \
     -DkHas_Driver_Name_Format=false \
     -DkNumber_Of_Channels=2 \
+    "$@" \
     -framework Accelerate -framework CoreAudio -framework CoreFoundation
 
   cat > "$bundle/Contents/Info.plist" <<PLIST
@@ -110,6 +112,8 @@ PLIST
 
 build_variant rx "Codex Virtual RX" "com.codexcall.driver.rx"
 build_variant tx "Codex Virtual TX" "com.codexcall.driver.tx"
+build_variant clock "Codex Virtual Clock" "com.codexcall.driver.clock" \
+  -DkDevice_HasInput=false -DkCanBeDefaultDevice=false -DkCanBeDefaultSystemDevice=false
 
 echo
 echo "Driver bundles written to $BUILD_DIR"

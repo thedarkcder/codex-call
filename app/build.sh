@@ -37,6 +37,7 @@ cp "$ROOT/native/helper/build/codex-call-helper" "$APP/Contents/Resources/codex-
 chmod 755 "$APP/Contents/Resources/codex-call-helper"
 cp -R "$ROOT/native/driver/build/CodexVirtualRX.driver" "$APP/Contents/Resources/driver/"
 cp -R "$ROOT/native/driver/build/CodexVirtualTX.driver" "$APP/Contents/Resources/driver/"
+cp -R "$ROOT/native/driver/build/CodexVirtualClock.driver" "$APP/Contents/Resources/driver/"
 cp -R "$ROOT/plugins/codex-call" "$APP/Contents/Resources/plugin"
 
 if [ -n "$CODESIGN_IDENTITY" ]; then

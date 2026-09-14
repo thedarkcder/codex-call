@@ -8,7 +8,7 @@ fi
 
 HAL_DIR="/Library/Audio/Plug-Ins/HAL"
 
-rm -rf "$HAL_DIR/CodexVirtualRX.driver" "$HAL_DIR/CodexVirtualTX.driver"
+rm -rf "$HAL_DIR/CodexVirtualRX.driver" "$HAL_DIR/CodexVirtualTX.driver" "$HAL_DIR/CodexVirtualClock.driver"
 
 echo "Restarting coreaudiod..."
 launchctl kickstart -k system/com.apple.audio.coreaudiod || killall coreaudiod || true

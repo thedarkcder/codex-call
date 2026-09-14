@@ -13,6 +13,7 @@ let pidURL = appSupportDir.appendingPathComponent("helper.pid")
 
 let virtualRXName = "Codex Virtual RX"
 let virtualTXName = "Codex Virtual TX"
+let virtualClockName = "Codex Virtual Clock"
 
 func propertyAddress(
     _ selector: AudioObjectPropertySelector,
@@ -128,6 +129,11 @@ func setDefaultDevice(_ selector: AudioObjectPropertySelector, _ id: AudioDevice
 
 func defaultInput() -> AudioDeviceID { defaultDevice(kAudioHardwarePropertyDefaultInputDevice) }
 func defaultOutput() -> AudioDeviceID { defaultDevice(kAudioHardwarePropertyDefaultOutputDevice) }
+
+func clockDeviceUID(fallback: String) -> String {
+    if let id = findDevice(named: virtualClockName) { return deviceUID(id) }
+    return fallback
+}
 
 func findDevice(named name: String) -> AudioDeviceID? {
     deviceIDs().first { deviceName($0) == name }
@@ -704,7 +710,7 @@ func commandRun(argv: [String], json: Bool) {
     var tapID = AudioObjectID(0)
     var aggregateID = AudioObjectID(0)
     var physicalOutput = output
-    var clockUID = deviceUID(physicalOutput)
+    var clockUID = clockDeviceUID(fallback: deviceUID(physicalOutput))
 
     func teardownTap() {
         if tapID != 0 { AudioHardwareDestroyProcessTap(tapID); tapID = 0 }
@@ -715,10 +721,10 @@ func commandRun(argv: [String], json: Bool) {
         do {
             var links: [Router.Link] = []
             if mode == "call" {
-                links.append(Router.Link(source: tx, destination: physicalOutput))
                 if aggregateID != 0 {
                     links.append(Router.Link(source: aggregateID, destination: rx))
                 }
+                links.append(Router.Link(source: tx, destination: physicalOutput))
             } else {
                 links.append(Router.Link(source: input, destination: rx))
                 links.append(Router.Link(source: tx, destination: output))
@@ -828,7 +834,6 @@ func commandRun(argv: [String], json: Bool) {
         let newDefault = defaultOutput()
         if newDefault != tx, newDefault != rx, hasOutput(newDefault), newDefault != physicalOutput {
             physicalOutput = newDefault
-            clockUID = deviceUID(newDefault)
             print("physical output updated: \(deviceName(newDefault))")
             fflush(stdout)
             rebuild()
@@ -1302,13 +1307,7 @@ func commandTap(argv: [String], json: Bool) {
         if json { print(jsonString(["ok": false, "error": message])) } else { print(message) }
         exit(3)
     }
-    let clockUID: String = {
-        if let config = loadConfig(), let id = findDevice(uid: config.physicalOutputUID) {
-            return deviceUID(id)
-        }
-        let output = defaultOutput()
-        return output != 0 ? deviceUID(output) : ""
-    }()
+    let clockUID = clockDeviceUID(fallback: deviceUID(defaultOutput()))
     let uid = tapUID(tapID)
     guard !uid.isEmpty, let aggregate = createTapAggregate(tapUIDString: uid, clockDeviceUID: clockUID) else {
         AudioHardwareDestroyProcessTap(tapID)

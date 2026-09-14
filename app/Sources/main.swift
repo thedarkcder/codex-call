@@ -136,7 +136,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func driverInstalled() -> Bool {
-        FileManager.default.fileExists(atPath: "/Library/Audio/Plug-Ins/HAL/CodexVirtualRX.driver")
+        let fm = FileManager.default
+        return fm.fileExists(atPath: "/Library/Audio/Plug-Ins/HAL/CodexVirtualRX.driver")
+            && fm.fileExists(atPath: "/Library/Audio/Plug-Ins/HAL/CodexVirtualTX.driver")
+            && fm.fileExists(atPath: "/Library/Audio/Plug-Ins/HAL/CodexVirtualClock.driver")
     }
 
     func installIfNeeded() {
@@ -216,16 +219,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let resources = Bundle.main.resourceURL else { return false }
         let driverRX = resources.appendingPathComponent("driver/CodexVirtualRX.driver")
         let driverTX = resources.appendingPathComponent("driver/CodexVirtualTX.driver")
+        let driverClock = resources.appendingPathComponent("driver/CodexVirtualClock.driver")
         let helper = resources.appendingPathComponent("codex-call-helper")
         let plugin = resources.appendingPathComponent("plugin")
 
         let script = """
         set -e
         mkdir -p /Library/Audio/Plug-Ins/HAL
-        rm -rf "/Library/Audio/Plug-Ins/HAL/CodexVirtualRX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualTX.driver"
+        rm -rf "/Library/Audio/Plug-Ins/HAL/CodexVirtualRX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualTX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualClock.driver"
         cp -R "\(driverRX.path)" /Library/Audio/Plug-Ins/HAL/
         cp -R "\(driverTX.path)" /Library/Audio/Plug-Ins/HAL/
-        chown -R root:wheel "/Library/Audio/Plug-Ins/HAL/CodexVirtualRX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualTX.driver"
+        cp -R "\(driverClock.path)" /Library/Audio/Plug-Ins/HAL/
+        chown -R root:wheel "/Library/Audio/Plug-Ins/HAL/CodexVirtualRX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualTX.driver" "/Library/Audio/Plug-Ins/HAL/CodexVirtualClock.driver"
         mkdir -p /usr/local/lib/codex-call /usr/local/bin
         cp "\(helper.path)" /usr/local/lib/codex-call/codex-call-helper
         cp "\(helper.path)" /usr/local/bin/codex-call-helper
